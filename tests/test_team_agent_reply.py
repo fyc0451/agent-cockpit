@@ -230,6 +230,184 @@ def test_team_work_respond_uses_persisted_mode_and_hides_secrets(monkeypatch):
     assert "registration-secret" not in response.text
 
 
+def test_consult_bridge_uses_explicit_same_project_lead_and_fixed_prompt(monkeypatch):
+    client = _prepare(monkeypatch)
+    monkeypatch.setattr(server, "_registry_scan", lambda: [
+        {
+            "project_key": PROJECT, "name": "codex-main",
+            "registration_token": "registration-secret",
+        },
+        {
+            "project_key": PROJECT, "name": "dev-main",
+            "registration_token": "dev-secret",
+        },
+    ])
+    candidates = [
+        {
+            "session": "demo", "generation": "run-1", "mail_project": PROJECT,
+            "ready": True, "status": "done",
+            "lead": {
+                "agent": "codex", "mail_name": "codex-main",
+                "pane_id": "team-pane", "status": "done",
+            },
+        },
+        {
+            "session": "dev-demo", "generation": "dev-run-1",
+            "mail_project": PROJECT, "ready": True, "status": "idle",
+            "lead": {
+                "agent": "codex", "mail_name": "dev-main",
+                "pane_id": "dev-pane", "participant_id": "dev-lead",
+                "status": "idle",
+            },
+        },
+    ]
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: candidates)
+    binding = team_sessions.list_bindings(HUB, 7)[0]
+    team_sessions.set_consult_target(
+        hub=HUB, human_id=7, project_slug="core",
+        target={
+            "session": "dev-demo", "session_generation": "dev-run-1",
+            "mail_project": PROJECT,
+            "lead": {
+                "agent": "codex", "mail_name": "dev-main",
+                "participant_id": "dev-lead",
+            },
+        },
+    )
+    binding = team_sessions.list_bindings(HUB, 7)[0]
+    claimed = server.team_lead_worker.poll_binding(
+        binding, candidates[0],
+        claim=lambda *_args: {
+            "status": "claimed", "claim_token": "claim-secret",
+            "claim_expires_at": "2099-01-01T00:00:00+00:00",
+            "reply_mode": "confirm",
+            "message": {
+                "inbox_item_id": 3, "message_id": 4, "subject": "remote",
+                "body_md": "REMOTE SECRET", "importance": "normal",
+                "sender_name": "Alice", "sender_handle": "alice",
+                "created_ts": "2026-08-25T10:00:00+08:00",
+            },
+        },
+        notify=lambda *_args: True,
+    )
+    prompts = []
+    monkeypatch.setattr(
+        server, "_notify_team_lead_work",
+        lambda session, pane, prompt: prompts.append((session, pane, prompt)) or True,
+    )
+    team_identity = {
+        "mail_project": PROJECT, "sender_name": "codex-main",
+        "registration_token": "registration-secret",
+    }
+
+    created = client.post(
+        f"/api/agent/team-work/{claimed['work_id']}/consult",
+        json={**team_identity, "kind": "evidence", "question": "数据库迁移通过了吗？"},
+    )
+
+    assert created.status_code == 200
+    request_id = created.json()["consult"]["request_id"]
+    assert prompts == [("dev-demo", "dev-pane", prompts[0][2])]
+    assert request_id in prompts[0][2]
+    assert "数据库迁移通过了吗" not in prompts[0][2]
+    assert "REMOTE SECRET" not in prompts[0][2]
+
+    next_response = client.post("/api/agent/project-consult/next", json={
+        "mail_project": PROJECT, "sender_name": "dev-main",
+        "registration_token": "dev-secret",
+    })
+    assert next_response.status_code == 200
+    assert next_response.json()["consult"]["question"] == "数据库迁移通过了吗？"
+
+    answer_payload = {
+        "mail_project": PROJECT, "sender_name": "dev-main",
+        "registration_token": "dev-secret", "response": "迁移测试已通过",
+    }
+    answered = client.post(
+        f"/api/agent/project-consult/{request_id}/respond", json=answer_payload,
+    )
+    replay = client.post(
+        f"/api/agent/project-consult/{request_id}/respond", json=answer_payload,
+    )
+    status = client.post(
+        f"/api/agent/team-work/{claimed['work_id']}/consult/status",
+        json=team_identity,
+    )
+    assert answered.status_code == replay.status_code == status.status_code == 200
+    assert status.json()["consult"]["response"] == "迁移测试已通过"
+
+
+@pytest.mark.parametrize("restarted", ["source", "target"])
+def test_consult_bridge_fails_closed_after_session_generation_changes(
+    monkeypatch, restarted,
+):
+    client = _prepare(monkeypatch)
+    monkeypatch.setattr(server, "_registry_scan", lambda: [
+        {
+            "project_key": PROJECT, "name": "codex-main",
+            "registration_token": "registration-secret",
+        },
+        {
+            "project_key": PROJECT, "name": "dev-main",
+            "registration_token": "dev-secret",
+        },
+    ])
+    target = {
+        "session": "dev-demo", "generation": "dev-run-1",
+        "mail_project": PROJECT, "ready": True, "status": "idle",
+        "lead": {
+            "agent": "codex", "mail_name": "dev-main",
+            "pane_id": "dev-pane", "status": "idle",
+        },
+    }
+    team_sessions.set_consult_target(
+        hub=HUB, human_id=7, project_slug="core",
+        target={
+            "session": "dev-demo", "session_generation": "dev-run-1",
+            "mail_project": PROJECT,
+            "lead": {"agent": "codex", "mail_name": "dev-main"},
+        },
+    )
+    binding = team_sessions.list_bindings(HUB, 7)[0]
+    work_id = server.team_lead_worker.poll_binding(
+        binding,
+        {"session": "demo", "generation": "run-1", "lead": {"pane_id": "p"}},
+        claim=lambda *_args: {
+            "status": "claimed", "claim_token": "claim",
+            "claim_expires_at": "2099-01-01T00:00:00+00:00",
+            "reply_mode": "auto",
+            "message": {
+                "inbox_item_id": 1, "message_id": 2, "subject": "s", "body_md": "b",
+                "importance": "normal", "sender_name": "a", "sender_handle": "a",
+                "created_ts": "2026-08-25T00:00:00Z",
+            },
+        }, notify=lambda *_args: True,
+    )["work_id"]
+    source = {
+        "session": "demo", "generation": "run-1", "mail_project": PROJECT,
+        "ready": True, "status": "done",
+        "lead": {"agent": "codex", "mail_name": "codex-main", "status": "done"},
+    }
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: [source, target])
+    created = client.post(f"/api/agent/team-work/{work_id}/consult", json={
+        "mail_project": PROJECT, "sender_name": "codex-main",
+        "registration_token": "registration-secret",
+        "kind": "status", "question": "状态？",
+    })
+    assert created.status_code == 200
+    if restarted == "source":
+        source["generation"] = "run-2"
+    else:
+        target["generation"] = "dev-run-2"
+
+    denied = client.post("/api/agent/project-consult/next", json={
+        "mail_project": PROJECT, "sender_name": "dev-main",
+        "registration_token": "dev-secret",
+    })
+    assert denied.status_code == 200
+    assert denied.json()["status"] == "empty"
+
+
 @pytest.mark.parametrize("reply_mode", ["confirm", "auto"])
 def test_worker_tick_wakes_running_done_lead(monkeypatch, reply_mode):
     _prepare(monkeypatch, reply_mode=reply_mode)

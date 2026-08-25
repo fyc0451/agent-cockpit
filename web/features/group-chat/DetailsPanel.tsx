@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useAppFrame } from '../shell/AppFrame'
 import { cx } from '../shell/cx'
 import { IconCloseFill14 } from '../shell/icons'
-import type { TeamBinding, TeamMember } from '../team/model'
+import type { TeamBinding, TeamConsultCandidate, TeamMember } from '../team/model'
 import type { ChatMember } from './model'
 import { FilePanel } from './FilePanel'
 import { MemberPanel } from './MemberPanel'
@@ -63,6 +63,7 @@ interface DetailsPanelProps {
   teamBinding?: TeamBinding | null
   teamWorkspaces?: Array<{ id: string; label: string }>
   teamAvailableAgents?: readonly string[]
+  teamConsultTargets?: TeamConsultCandidate[]
   onTeamCreateSession?: (projectSlug: string, input: {
     workspaceId: string
     agent: TeamAgentKind
@@ -71,6 +72,7 @@ interface DetailsPanelProps {
     replace?: boolean
   }) => Promise<void>
   onTeamDeleteSession?: (projectSlug: string) => Promise<void>
+  onTeamSetConsultTarget?: (projectSlug: string, session: string | null) => Promise<void>
   // 文件面板：会话/项目目录；没有目录时不展示文件 tab
   fileRoot: string | null
   onPreview: (path: string) => void
@@ -99,8 +101,10 @@ export function DetailsPanel({
   teamBinding = null,
   teamWorkspaces = [],
   teamAvailableAgents = [],
+  teamConsultTargets = [],
   onTeamCreateSession,
   onTeamDeleteSession,
+  onTeamSetConsultTarget,
   fileRoot,
   onPreview,
 }: DetailsPanelProps) {
@@ -117,6 +121,7 @@ export function DetailsPanel({
   const [teamAgentReplyMode, setTeamAgentReplyMode] = useState<'confirm' | 'auto'>('confirm')
   const [teamAgentLoading, setTeamAgentLoading] = useState(false)
   const [teamAgentError, setTeamAgentError] = useState<string | null>(null)
+  const [teamConsultSession, setTeamConsultSession] = useState('')
 
   useEffect(() => {
     if (!teamWorkspaces.some((workspace) => workspace.id === teamWorkspaceId)) {
@@ -134,6 +139,10 @@ export function DetailsPanel({
     setTeamAgentReplyMode(teamBinding?.replyMode === 'auto' ? 'auto' : 'confirm')
     setTeamAgentError(null)
   }, [teamBinding?.replyMode, teamTopic])
+
+  useEffect(() => {
+    setTeamConsultSession(teamBinding?.consultTarget?.session ?? '')
+  }, [teamBinding?.consultTarget?.session, teamTopic])
 
   const createTopicAgent = async () => {
     if (!teamTopic || !onTeamCreateSession) return
@@ -176,6 +185,19 @@ export function DetailsPanel({
     setTeamAgentError(null)
     try {
       await onTeamDeleteSession(teamTopic)
+    } catch (error) {
+      setTeamAgentError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setTeamAgentLoading(false)
+    }
+  }
+
+  const saveConsultTarget = async () => {
+    if (!teamTopic || !onTeamSetConsultTarget) return
+    setTeamAgentLoading(true)
+    setTeamAgentError(null)
+    try {
+      await onTeamSetConsultTarget(teamTopic, teamConsultSession || null)
     } catch (error) {
       setTeamAgentError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -234,25 +256,27 @@ export function DetailsPanel({
                   )}
                 </span>
               </summary>
-              {onTeamCreateSession && (
+              {(onTeamCreateSession || (teamBinding?.managedRuntime && onTeamSetConsultTarget)) && (
                 <div className={css.teamAgentForm}>
-                  <select aria-label="Topic Agent 工作区" value={teamWorkspaceId} onChange={(event) => setTeamWorkspaceId(event.target.value)} disabled={teamAgentLoading}>
-                    {teamWorkspaces.length === 0 && <option value="">没有本地工作区</option>}
-                    {teamWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.label}</option>)}
-                  </select>
-                  <select aria-label="Topic Agent 类型" value={teamAgentKind} onChange={(event) => setTeamAgentKind(event.target.value as TeamAgentKind)} disabled={teamAgentLoading || selectableTeamAgents.length === 0}>
-                    {selectableTeamAgents.length === 0 && <option value="codex">没有可用 Agent CLI</option>}
-                    {selectableTeamAgents.map((agent) => <option key={agent} value={agent}>{agent}</option>)}
-                  </select>
-                  <input aria-label="Topic Agent 模型" placeholder="模型（可选）" value={teamAgentModel} onChange={(event) => setTeamAgentModel(event.target.value)} disabled={teamAgentLoading} />
-                  <select aria-label="Topic Agent 回复模式" value={teamAgentReplyMode} onChange={(event) => setTeamAgentReplyMode(event.target.value as 'confirm' | 'auto')} disabled={teamAgentLoading}>
-                    <option value="confirm">确认后回复</option>
-                    <option value="auto">自动回复</option>
-                  </select>
+                  {onTeamCreateSession && (<>
+                    <select aria-label="Topic Agent 工作区" value={teamWorkspaceId} onChange={(event) => setTeamWorkspaceId(event.target.value)} disabled={teamAgentLoading}>
+                      {teamWorkspaces.length === 0 && <option value="">没有本地工作区</option>}
+                      {teamWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.label}</option>)}
+                    </select>
+                    <select aria-label="Topic Agent 类型" value={teamAgentKind} onChange={(event) => setTeamAgentKind(event.target.value as TeamAgentKind)} disabled={teamAgentLoading || selectableTeamAgents.length === 0}>
+                      {selectableTeamAgents.length === 0 && <option value="codex">没有可用 Agent CLI</option>}
+                      {selectableTeamAgents.map((agent) => <option key={agent} value={agent}>{agent}</option>)}
+                    </select>
+                    <input aria-label="Topic Agent 模型" placeholder="模型（可选）" value={teamAgentModel} onChange={(event) => setTeamAgentModel(event.target.value)} disabled={teamAgentLoading} />
+                    <select aria-label="Topic Agent 回复模式" value={teamAgentReplyMode} onChange={(event) => setTeamAgentReplyMode(event.target.value as 'confirm' | 'auto')} disabled={teamAgentLoading}>
+                      <option value="confirm">确认后回复</option>
+                      <option value="auto">自动回复</option>
+                    </select>
+                    <button type="button" onClick={() => void createTopicAgent()} disabled={teamAgentLoading || !teamWorkspaceId || selectableTeamAgents.length === 0}>
+                      {teamAgentLoading ? '创建中…' : teamBinding ? '迁移 / 更换 Agent' : '创建 Topic Agent'}
+                    </button>
+                  </>)}
                   {teamAgentError && <div className="gc-modal-error">{teamAgentError}</div>}
-                  <button type="button" onClick={() => void createTopicAgent()} disabled={teamAgentLoading || !teamWorkspaceId || selectableTeamAgents.length === 0}>
-                    {teamAgentLoading ? '创建中…' : teamBinding ? '迁移 / 更换 Agent' : '创建 Topic Agent'}
-                  </button>
                   {teamBinding?.managedRuntime && onTeamDeleteSession && (
                     <button
                       type="button"
@@ -262,6 +286,35 @@ export function DetailsPanel({
                     >
                       删除 Topic Agent
                     </button>
+                  )}
+                  {teamBinding?.managedRuntime && onTeamSetConsultTarget && (
+                    <>
+                      <label htmlFor="team-consult-target">缺少项目上下文时询问</label>
+                      <select
+                        id="team-consult-target"
+                        aria-label="Topic Agent 咨询目标"
+                        value={teamConsultSession}
+                        onChange={(event) => setTeamConsultSession(event.target.value)}
+                        disabled={teamAgentLoading}
+                      >
+                        <option value="">不启用咨询</option>
+                        {teamConsultTargets.map((target) => (
+                          <option key={target.session} value={target.session}>{target.label}</option>
+                        ))}
+                      </select>
+                      {teamBinding.consultTarget && !teamBinding.consultTarget.ready && (
+                        <div className="gc-modal-error">
+                          {teamBinding.consultTarget.reason || '咨询目标不可用，需要重新选择'}
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void saveConsultTarget()}
+                        disabled={teamAgentLoading}
+                      >
+                        保存咨询目标
+                      </button>
+                    </>
                   )}
                 </div>
               )}

@@ -315,4 +315,48 @@ describe('团队话题成员详情', () => {
     expect(within(panel).getByText('读取成员列表失败')).toBeInTheDocument()
     expect(within(panel).queryByText('我')).not.toBeInTheDocument()
   })
+
+  it('显式选择同项目普通开发 Lead 作为咨询目标', async () => {
+    const onSet = vi.fn().mockResolvedValue(undefined)
+    render(
+      <AppFrame sidebar={null}>
+        <DetailsPanel
+          tab="members"
+          onTabChange={vi.fn()}
+          members={[]}
+          session={null}
+          workdir={null}
+          onMention={vi.fn()}
+          onFilter={vi.fn()}
+          onInteract={vi.fn()}
+          onOpenTerminal={vi.fn()}
+          onMembersChanged={vi.fn()}
+          fileRoot={null}
+          onPreview={vi.fn()}
+          teamTopic="ready"
+          teamMembers={[]}
+          teamBinding={{
+            project_slug: 'ready',
+            session: 'team-ready',
+            managedRuntime: true,
+            consultTarget: null,
+          }}
+          teamConsultTargets={[{
+            session: 'ready-dev',
+            label: 'ready-dev · Lead TopazOwl',
+            status: 'idle',
+            projectRef: 'same-project',
+            leadName: 'TopazOwl',
+          }]}
+          onTeamCreateSession={vi.fn().mockResolvedValue(undefined)}
+          onTeamSetConsultTarget={onSet}
+        />
+      </AppFrame>,
+    )
+    const user = userEvent.setup()
+    await user.click(screen.getByText('我的 Topic Agent'))
+    await user.selectOptions(screen.getByLabelText('Topic Agent 咨询目标'), 'ready-dev')
+    await user.click(screen.getByRole('button', { name: '保存咨询目标' }))
+    await waitFor(() => expect(onSet).toHaveBeenCalledWith('ready', 'ready-dev'))
+  })
 })

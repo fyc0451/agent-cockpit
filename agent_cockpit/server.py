@@ -2180,6 +2180,7 @@ async def protect_api(request: Request, call_next):
         not protected
         or path in PUBLIC_PATHS
         or path.startswith("/api/agent/team-work/")
+        or path.startswith("/api/agent/project-consult/")
     ):
         return await call_next(request)
     if not _request_authenticated(request):
@@ -2434,6 +2435,10 @@ class TeamSessionCreateReq(BaseModel):
 
 class TeamReplyModeReq(BaseModel):
     reply_mode: str = Field(..., pattern=r"^(confirm|auto)$")
+
+
+class TeamConsultTargetReq(BaseModel):
+    session: str | None = Field(default=None, max_length=64)
 
 
 class TeamLedgerSendReq(BaseModel):
@@ -4433,6 +4438,72 @@ def _public_team_session_candidate(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ordinary_consult_candidates(
+    binding: dict[str, Any], candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """只允许同一 Agent Mail 项目的普通开发 Lead 作为咨询目标。"""
+    result: list[dict[str, Any]] = []
+    for candidate in candidates:
+        lead = candidate.get("lead") if isinstance(candidate.get("lead"), dict) else {}
+        if (
+            candidate.get("ready") is not True
+            or candidate.get("mail_project") != binding.get("mail_project")
+            or candidate.get("status") not in {"working", "idle", "blocked", "done"}
+            or lead.get("status") not in {"working", "idle", "blocked", "done"}
+            or not lead.get("mail_name")
+            or team_sessions.is_managed_session(
+                str(candidate.get("session") or ""),
+                str(candidate.get("generation") or ""),
+            )
+        ):
+            continue
+        result.append(candidate)
+    return result
+
+
+def _public_consult_target_candidate(row: dict[str, Any]) -> dict[str, Any]:
+    lead = row.get("lead") if isinstance(row.get("lead"), dict) else {}
+    return {
+        "session": row.get("session"),
+        "status": row.get("status"),
+        "lead": {
+            "agent": lead.get("agent"),
+            "mail_name": lead.get("mail_name"),
+            "status": lead.get("status"),
+        },
+        "project_ref": _team_project_ref(row.get("mail_project")),
+    }
+
+
+def _resolved_consult_target(
+    binding: dict[str, Any], candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str | None]:
+    saved = binding.get("consult_target")
+    if not isinstance(saved, dict):
+        return None, None
+    lead = saved.get("lead") if isinstance(saved.get("lead"), dict) else {}
+    matches = [
+        row for row in _ordinary_consult_candidates(binding, candidates)
+        if row.get("session") == saved.get("session")
+        and row.get("generation") == saved.get("session_generation")
+        and row.get("mail_project") == saved.get("mail_project")
+        and isinstance(row.get("lead"), dict)
+        and row["lead"].get("mail_name") == lead.get("mail_name")
+        and MAIL_AGENT_NAMES.get(str(row["lead"].get("agent") or ""), str(row["lead"].get("agent") or ""))
+        == MAIL_AGENT_NAMES.get(str(lead.get("agent") or ""), str(lead.get("agent") or ""))
+    ]
+    if len(matches) == 1:
+        return matches[0], None
+    same_session = [
+        row for row in candidates if row.get("session") == saved.get("session")
+    ]
+    if len(same_session) > 1:
+        return None, "咨询目标身份不唯一，需要重新选择"
+    if same_session:
+        return None, "咨询目标已重启或身份变化，需要重新选择"
+    return None, "咨询目标已停止，需要重新选择"
+
+
 def _team_project_ref(value: Any) -> str | None:
     """同项目候选匹配用匿名引用；不向浏览器暴露本机绝对路径。"""
     if not isinstance(value, str) or not value:
@@ -4480,6 +4551,13 @@ def _public_team_session_binding(
         reason = "Session 已重建，需要重新绑定"
     elif candidate is None:
         reason = "Session 已停止"
+    consult_candidate, consult_reason = _resolved_consult_target(row, candidates)
+    saved_consult = row.get("consult_target") if isinstance(row.get("consult_target"), dict) else None
+    saved_consult_lead = (
+        saved_consult.get("lead")
+        if saved_consult is not None and isinstance(saved_consult.get("lead"), dict)
+        else {}
+    )
     return {
         "project_slug": row.get("project_slug"),
         "session": row.get("session"),
@@ -4507,6 +4585,19 @@ def _public_team_session_binding(
         "managed_runtime": managed_runtime,
         "project_ref": _team_project_ref(row.get("mail_project")),
         "updated_ts": row.get("updated_ts"),
+        "consult_target": ({
+            "session": saved_consult.get("session"),
+            "lead": {
+                "agent": saved_consult_lead.get("agent"),
+                "mail_name": saved_consult_lead.get("mail_name"),
+                "status": (
+                    consult_candidate.get("lead", {}).get("status")
+                    if consult_candidate is not None else None
+                ),
+            },
+            "ready": consult_candidate is not None,
+            "reason": consult_reason,
+        } if saved_consult is not None else None),
     }
 
 
@@ -4550,8 +4641,16 @@ def api_team_session_bindings(request: Request):
     hub = hub_client.public_team_config()["team_hub"]
     candidates = _team_session_candidates()
     bindings = _team_session_bindings_for(hub, int(human["id"]))
+    consult_candidates: dict[tuple[str, str], dict[str, Any]] = {}
+    for binding in bindings:
+        for row in _ordinary_consult_candidates(binding, candidates):
+            consult_candidates[(str(row.get("session")), str(row.get("generation")))] = row
     return {
         "sessions": [_public_team_session_candidate(row) for row in candidates],
+        "consult_targets": [
+            _public_consult_target_candidate(row)
+            for row in consult_candidates.values()
+        ],
         "bindings": [
             _public_team_session_binding(row, candidates) for row in bindings
         ],
@@ -4888,6 +4987,76 @@ def api_team_session_reply_mode(
     }
 
 
+@app.patch("/api/team-auth/session-bindings/{project_slug}/consult-target")
+def api_team_session_consult_target(
+    project_slug: str, req: TeamConsultTargetReq, request: Request,
+):
+    """Human 显式选择或关闭同项目普通开发 Lead 咨询目标。"""
+    slug = _team_project_slug(project_slug)
+    _, human = _team_human_context(request)
+    hub = hub_client.public_team_config()["team_hub"]
+    with _TEAM_SESSION_BIND_LOCK:
+        current = next((
+            row for row in _team_session_bindings_for(hub, int(human["id"]))
+            if row.get("project_slug") == slug
+        ), None)
+        if current is None:
+            raise HTTPException(404, "团队项目尚未绑定本机 Session")
+        candidates = _team_session_candidates()
+        target = None
+        if req.session is not None:
+            _validate_session_name(req.session)
+            matches = [
+                row for row in _ordinary_consult_candidates(current, candidates)
+                if row.get("session") == req.session
+            ]
+            if len(matches) != 1:
+                raise HTTPException(409, "同项目普通开发 Lead 不存在或不唯一")
+            row = matches[0]
+            lead = row.get("lead") if isinstance(row.get("lead"), dict) else {}
+            target = {
+                "session": row["session"],
+                "session_generation": row["generation"],
+                "mail_project": row["mail_project"],
+                "lead": {
+                    key: lead.get(key)
+                    for key in ("agent", "mail_name", "participant_id")
+                },
+            }
+        try:
+            saved_target = (
+                current.get("consult_target")
+                if isinstance(current.get("consult_target"), dict) else None
+            )
+            target_changed = (
+                (saved_target is None) != (target is None)
+                or (
+                    saved_target is not None and target is not None
+                    and (
+                        saved_target.get("session") != target.get("session")
+                        or saved_target.get("session_generation")
+                        != target.get("session_generation")
+                    )
+                )
+            )
+            if target_changed:
+                team_lead_worker.invalidate_consults_for_binding(current)
+            binding = team_sessions.set_consult_target(
+                hub=hub,
+                human_id=int(human["id"]),
+                project_slug=slug,
+                target=target,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "团队项目尚未绑定本机 Session") from exc
+        except (OSError, ValueError) as exc:
+            raise HTTPException(500, "咨询目标保存失败") from exc
+    return {
+        "ok": True,
+        "binding": _public_team_session_binding(binding, candidates),
+    }
+
+
 @app.delete("/api/team-auth/session-bindings/{project_slug}")
 def api_team_session_unbind(
     project_slug: str,
@@ -5059,6 +5228,10 @@ def _team_lead_worker_tick() -> None:
                     logger.warning("Team Lead 收件暂时失败: HTTP %s", exc.status_code)
             except Exception:
                 logger.exception("Team Lead 本地 worker tick 失败")
+        try:
+            _notify_pending_project_consults()
+        except Exception:
+            logger.exception("项目咨询提醒 tick 失败")
 
 
 def _notify_team_lead_work(session: str, pane_id: str, prompt: str) -> bool:
@@ -5096,6 +5269,151 @@ def _team_work_auth(body: dict[str, Any], request: Request) -> dict[str, Any]:
     )
 
 
+def _local_agent_identity(body: dict[str, Any], request: Request) -> tuple[str, str]:
+    """验证本机 Agent Mail 身份，但不赋予 Team 回复 capability。"""
+    if not _is_loopback(request.client.host if request.client else None):
+        raise _team_agent_reply_forbidden()
+    mail_project = body.get("mail_project")
+    sender_name = body.get("sender_name")
+    registration_token = body.get("registration_token")
+    if (
+        not isinstance(mail_project, str)
+        or not mail_project
+        or len(mail_project) > 4096
+        or not Path(mail_project).is_absolute()
+        or not isinstance(sender_name, str)
+        or not _REGISTRY_NAME_RE.fullmatch(sender_name)
+        or not isinstance(registration_token, str)
+        or not registration_token
+        or len(registration_token) > 4096
+    ):
+        raise _team_agent_reply_forbidden()
+    try:
+        project = str(Path(mail_project).expanduser().resolve())
+    except (OSError, ValueError):
+        raise _team_agent_reply_forbidden()
+    matches = [
+        identity for identity in _registry_scan()
+        if identity.get("project_key") == project
+        and identity.get("name") == sender_name
+        and isinstance(identity.get("registration_token"), str)
+    ]
+    if len(matches) != 1:
+        raise _team_agent_reply_forbidden()
+    try:
+        valid = hmac.compare_digest(
+            str(matches[0]["registration_token"]), registration_token,
+        )
+    except TypeError:
+        valid = False
+    if not valid:
+        raise _team_agent_reply_forbidden()
+    return project, sender_name
+
+
+def _consult_live_target(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    matches = []
+    for candidate in _team_session_candidates():
+        lead = candidate.get("lead") if isinstance(candidate.get("lead"), dict) else {}
+        if (
+            candidate.get("session") == snapshot.get("target_session")
+            and candidate.get("generation") == snapshot.get("target_session_generation")
+            and candidate.get("mail_project") == snapshot.get("target_mail_project")
+            and candidate.get("ready") is True
+            and lead.get("mail_name") == snapshot.get("target_lead_mail_name")
+            and MAIL_AGENT_NAMES.get(str(lead.get("agent") or ""), str(lead.get("agent") or ""))
+            == MAIL_AGENT_NAMES.get(str(snapshot.get("target_lead_agent") or ""), str(snapshot.get("target_lead_agent") or ""))
+            and not team_sessions.is_managed_session(
+                str(candidate.get("session") or ""),
+                str(candidate.get("generation") or ""),
+            )
+        ):
+            matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _consult_live_source(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """咨询来源也必须仍是同一 managed Team Lead 精确代际。"""
+    human_id = snapshot.get("source_human_id")
+    if type(human_id) is not int:
+        return None
+    try:
+        bindings = team_sessions.list_bindings(
+            str(snapshot.get("source_hub") or ""), human_id,
+        )
+    except (OSError, TypeError, ValueError):
+        return None
+    matches = []
+    for binding in bindings:
+        lead = binding.get("lead") if isinstance(binding.get("lead"), dict) else {}
+        if (
+            binding.get("project_slug") == snapshot.get("source_project_slug")
+            and binding.get("client_session_id")
+            == snapshot.get("source_client_session_id")
+            and binding.get("session") == snapshot.get("source_session")
+            and binding.get("session_generation")
+            == snapshot.get("source_session_generation")
+            and binding.get("mail_project") == snapshot.get("source_mail_project")
+            and lead.get("mail_name") == snapshot.get("source_lead_mail_name")
+            and MAIL_AGENT_NAMES.get(
+                str(lead.get("agent") or ""), str(lead.get("agent") or ""),
+            ) == MAIL_AGENT_NAMES.get(
+                str(snapshot.get("source_lead_agent") or ""),
+                str(snapshot.get("source_lead_agent") or ""),
+            )
+            and binding.get("managed_runtime") is True
+            and team_sessions.binding_auth_active(binding)
+        ):
+            matches.append(binding)
+    if len(matches) != 1:
+        return None
+    binding = matches[0]
+    candidates = [
+        candidate for candidate in _team_session_candidates()
+        if candidate.get("session") == binding.get("session")
+        and candidate.get("generation") == binding.get("session_generation")
+        and candidate.get("mail_project") == binding.get("mail_project")
+        and candidate.get("ready") is True
+        and _team_binding_lead_matches_candidate(binding, candidate)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _notify_pending_project_consults() -> None:
+    for snapshot in team_lead_worker.pending_consult_notifications():
+        request_id = str(snapshot.get("request_id") or "")
+        if _consult_live_source(snapshot) is None:
+            team_lead_worker.invalidate_consult(
+                request_id, "source_identity_changed",
+            )
+            continue
+        candidate = _consult_live_target(snapshot)
+        if candidate is None:
+            same_session = [
+                row for row in _team_session_candidates()
+                if row.get("session") == snapshot.get("target_session")
+            ]
+            reason = (
+                "target_ambiguous" if len(same_session) > 1
+                else "target_identity_changed" if same_session
+                else "target_missing"
+            )
+            team_lead_worker.invalidate_consult(request_id, reason)
+            continue
+        lead = candidate.get("lead") if isinstance(candidate.get("lead"), dict) else {}
+        prompt = (
+            "[项目上下文咨询] Team Agent 需要一条事实性上下文，"
+            f"request_id {request_id}。请通过 Cockpit 本机 "
+            "agent-mail-tools/project-consult 主动读取并答复。"
+            "团队原文不会注入当前 pane；只回答状态、决策、证据或阻塞，"
+            "不要替 Team Session 执行任务。"
+        )
+        if _notify_team_lead_work(
+            str(candidate["session"]), str(lead.get("pane_id") or ""), prompt,
+        ):
+            team_lead_worker.mark_consult_notified(request_id)
+
+
 @app.post("/api/agent/team-work/next")
 async def api_team_agent_work_next(request: Request):
     """当前 active Lead 主动读取一条已领取正文，不接受 session/pane 参数。"""
@@ -5113,6 +5431,162 @@ async def api_team_agent_work_next(request: Request):
     except OSError as exc:
         raise HTTPException(503, "团队工作队列暂时不可用") from exc
     return {"status": "pending" if work is not None else "empty", "work": work}
+
+
+@app.post("/api/agent/team-work/{work_id}/consult")
+async def api_team_agent_work_consult(work_id: str, request: Request):
+    """Team Agent 显式发起咨询；目标只能来自 Human 保存的精确绑定。"""
+    if not re.fullmatch(r"[0-9a-f]{32}", work_id):
+        raise HTTPException(404, "团队工作不存在")
+    try:
+        body = await request.json()
+    except (UnicodeError, ValueError):
+        raise HTTPException(400, "咨询请求无效")
+    allowed = {
+        "mail_project", "sender_name", "registration_token", "kind", "question",
+    }
+    if not isinstance(body, dict) or set(body) - allowed:
+        raise HTTPException(400, "咨询请求包含未支持字段")
+    kind = body.get("kind")
+    question = body.get("question")
+    if kind not in {"status", "decision", "evidence", "blocker"}:
+        raise HTTPException(400, "咨询类型无效")
+    if not isinstance(question, str) or not question.strip() or len(question) > 2_000:
+        raise HTTPException(400, "咨询问题无效")
+    binding = _team_work_auth(body, request)
+    if team_lead_worker.work_for_binding(work_id, binding) is None:
+        raise HTTPException(404, "团队工作不存在")
+    target, reason = _resolved_consult_target(binding, _team_session_candidates())
+    if target is None:
+        detail = reason or "尚未显式选择同项目普通开发 Lead"
+        raise HTTPException(409, detail)
+    lead = target.get("lead") if isinstance(target.get("lead"), dict) else {}
+    snapshot = {
+        "session": target["session"],
+        "session_generation": target["generation"],
+        "mail_project": target["mail_project"],
+        "lead": {
+            key: lead.get(key)
+            for key in ("agent", "mail_name", "participant_id")
+        },
+    }
+    try:
+        result = team_lead_worker.create_consult(
+            work_id, binding, snapshot, kind=kind, question=question,
+        )
+        _notify_pending_project_consults()
+        return {"status": result["state"], "consult": result}
+    except KeyError as exc:
+        raise HTTPException(404, "团队工作不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(503, "咨询队列暂时不可用") from exc
+
+
+@app.post("/api/agent/team-work/{work_id}/consult/status")
+async def api_team_agent_work_consult_status(work_id: str, request: Request):
+    if not re.fullmatch(r"[0-9a-f]{32}", work_id):
+        raise HTTPException(404, "团队工作不存在")
+    try:
+        body = await request.json()
+    except (UnicodeError, ValueError):
+        raise HTTPException(400, "咨询状态请求无效")
+    if not isinstance(body, dict) or set(body) - {
+        "mail_project", "sender_name", "registration_token",
+    }:
+        raise HTTPException(400, "咨询状态请求包含未支持字段")
+    binding = _team_work_auth(body, request)
+    result = team_lead_worker.consult_for_binding(work_id, binding)
+    if result is not None and result.get("state") in {"pending", "claimed"}:
+        snapshot = team_lead_worker.consult_snapshot(str(result["request_id"]))
+        source_live = snapshot is not None and _consult_live_source(snapshot) is not None
+        target_live = snapshot is not None and _consult_live_target(snapshot) is not None
+        if not source_live or not target_live:
+            if snapshot is not None:
+                team_lead_worker.invalidate_consult(
+                    str(result["request_id"]),
+                    (
+                        "source_identity_changed"
+                        if not source_live
+                        else "target_identity_changed"
+                    ),
+                )
+            result = team_lead_worker.consult_for_binding(work_id, binding)
+    return {"status": result["state"] if result is not None else "empty", "consult": result}
+
+
+@app.post("/api/agent/project-consult/next")
+async def api_project_consult_next(request: Request):
+    """普通开发 Lead 主动领取咨询；调用方不能指定 Session 或 pane。"""
+    try:
+        body = await request.json()
+    except (UnicodeError, ValueError):
+        raise HTTPException(400, "项目咨询请求无效")
+    if not isinstance(body, dict) or set(body) - {
+        "mail_project", "sender_name", "registration_token",
+    }:
+        raise HTTPException(400, "项目咨询请求包含未支持字段")
+    project, sender_name = _local_agent_identity(body, request)
+    result = team_lead_worker.next_consult_for_target(project, sender_name)
+    if result is None:
+        return {"status": "empty", "consult": None}
+    snapshot = team_lead_worker.consult_snapshot(str(result["request_id"]))
+    source_live = snapshot is not None and _consult_live_source(snapshot) is not None
+    target_live = snapshot is not None and _consult_live_target(snapshot) is not None
+    if not source_live or not target_live:
+        if snapshot is not None:
+            team_lead_worker.invalidate_consult(
+                str(result["request_id"]),
+                (
+                    "source_identity_changed"
+                    if not source_live
+                    else "target_identity_changed"
+                ),
+            )
+        return {"status": "empty", "consult": None}
+    return {"status": result["state"], "consult": result}
+
+
+@app.post("/api/agent/project-consult/{request_id}/respond")
+async def api_project_consult_respond(request_id: str, request: Request):
+    if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+        raise HTTPException(404, "咨询请求不存在")
+    try:
+        body = await request.json()
+    except (UnicodeError, ValueError):
+        raise HTTPException(400, "咨询答复无效")
+    if not isinstance(body, dict) or set(body) - {
+        "mail_project", "sender_name", "registration_token", "response",
+    }:
+        raise HTTPException(400, "咨询答复包含未支持字段")
+    response = body.get("response")
+    if not isinstance(response, str) or not response.strip() or len(response) > 10_000:
+        raise HTTPException(400, "咨询答复无效")
+    project, sender_name = _local_agent_identity(body, request)
+    snapshot = team_lead_worker.consult_snapshot(request_id)
+    if snapshot is None:
+        raise HTTPException(404, "咨询请求不存在")
+    if (
+        snapshot.get("target_mail_project") != project
+        or snapshot.get("target_lead_mail_name") != sender_name
+    ):
+        raise _team_agent_reply_forbidden()
+    if _consult_live_source(snapshot) is None:
+        team_lead_worker.invalidate_consult(request_id, "source_identity_changed")
+        raise HTTPException(409, "Team Agent 已重启或身份变化")
+    if _consult_live_target(snapshot) is None:
+        team_lead_worker.invalidate_consult(request_id, "target_identity_changed")
+        raise HTTPException(409, "咨询目标已重启或身份变化")
+    try:
+        result = team_lead_worker.respond_consult(
+            request_id, project, sender_name, response,
+        )
+        return {"status": result["state"], "consult": result}
+    except KeyError as exc:
+        raise HTTPException(404, "咨询请求不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/agent/team-work/{work_id}/respond")

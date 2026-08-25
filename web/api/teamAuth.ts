@@ -5,6 +5,7 @@ import type {
   TeamTopic,
   TeamBinding,
   TeamSessionCandidate,
+  TeamConsultCandidate,
   TeamUser,
   TeamMember,
   TeamReplyRequest,
@@ -180,6 +181,7 @@ export async function teamAuthStatus(): Promise<{
 
 export async function teamSessionBindings(): Promise<{
   sessions: TeamSessionCandidate[]
+  consultTargets: TeamConsultCandidate[]
   bindings: TeamBinding[]
   topics: TeamTopic[]
 }> {
@@ -233,6 +235,8 @@ export async function teamSessionBindings(): Promise<{
       const session = typeof item.session === 'string' ? item.session : ''
       if (project_slug && session) {
         const lead = isObj(item.lead) ? item.lead : null
+        const consult = isObj(item.consult_target) ? item.consult_target : null
+        const consultLead = consult && isObj(consult.lead) ? consult.lead : null
         bindings.push({
           project_slug,
           session,
@@ -249,6 +253,20 @@ export async function teamSessionBindings(): Promise<{
                 agent: typeof lead.agent === 'string' ? lead.agent : null,
                 mailName: typeof lead.mail_name === 'string' ? lead.mail_name : null,
                 status: typeof lead.status === 'string' ? lead.status : null,
+              }
+            : null,
+          consultTarget: consult && typeof consult.session === 'string'
+            ? {
+                session: consult.session,
+                ready: consult.ready === true,
+                reason: typeof consult.reason === 'string' ? consult.reason : null,
+                lead: consultLead
+                  ? {
+                      agent: typeof consultLead.agent === 'string' ? consultLead.agent : null,
+                      mailName: typeof consultLead.mail_name === 'string' ? consultLead.mail_name : null,
+                      status: typeof consultLead.status === 'string' ? consultLead.status : null,
+                    }
+                  : null,
               }
             : null,
         })
@@ -270,7 +288,54 @@ export async function teamSessionBindings(): Promise<{
     }
   }
 
-  return { sessions, bindings, topics }
+  const consultTargets: TeamConsultCandidate[] = []
+  if (Array.isArray(data.consult_targets)) {
+    for (const item of data.consult_targets) {
+      if (!isObj(item) || typeof item.session !== 'string' || !item.session) continue
+      const lead = isObj(item.lead) ? item.lead : null
+      const leadName = lead && typeof lead.mail_name === 'string' ? lead.mail_name : null
+      const status = typeof item.status === 'string' ? item.status : ''
+      consultTargets.push({
+        session: item.session,
+        label: [item.session, leadName ? `Lead ${leadName}` : null].filter(Boolean).join(' · '),
+        status,
+        projectRef: typeof item.project_ref === 'string' ? item.project_ref : null,
+        leadName,
+      })
+    }
+  }
+
+  return { sessions, consultTargets, bindings, topics }
+}
+
+export async function setTeamConsultTarget(
+  projectSlug: string,
+  session: string | null,
+): Promise<void> {
+  const response = await fetch(
+    `/api/team-auth/session-bindings/${encodeURIComponent(projectSlug)}/consult-target`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session }),
+      credentials: 'include',
+    },
+  )
+  if (!response.ok) {
+    let message = '保存咨询目标失败'
+    try {
+      const data: unknown = await response.json()
+      if (isObj(data) && typeof data.detail === 'string') message = data.detail
+    } catch {
+      // 非 JSON 错误沿用稳定提示。
+    }
+    throw new ApiError({
+      code: 'consult_target_failed',
+      message,
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
 }
 
 function parseTopic(raw: unknown): TeamTopic | null {

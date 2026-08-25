@@ -466,7 +466,7 @@ _JSON_VERSIONED: dict[str, int] = {
     "mail_projects": 1,
     "team_messages": 1,
     "team_sessions": 1,
-    "inbox_route": 3,
+    "inbox_route": 5,
     "typing": 1,
 }
 
@@ -1056,7 +1056,7 @@ _JSON_SHAPES: dict[str, frozenset[str]] = {
     "mail_projects": frozenset({"version", "sessions"}),
     "team_messages": frozenset({"version", "messages"}),
     "team_sessions": frozenset({"version", "bindings"}),
-    "inbox_route": frozenset({"version", "work_items"}),
+    "inbox_route": frozenset({"version", "work_items", "consult_requests"}),
 }
 
 
@@ -1158,7 +1158,10 @@ def _check_versioned_json(
             "session_dir", "mail_project", "lead", "client_session_id",
             "agent_id", "updated_ts",
         })
-        optional_b = frozenset({"reply_token", "reply_mode", "auth_expires_at"})
+        optional_b = frozenset({
+            "reply_token", "reply_mode", "auth_expires_at", "managed_runtime",
+            "consult_target",
+        })
         lead_keys = frozenset({"pane_id", "agent", "mail_name", "participant_id"})
         for item in bindings:
             if not isinstance(item, dict):
@@ -1203,9 +1206,35 @@ def _check_versioned_json(
                 or item["auth_expires_at"] < 0
             ):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "managed_runtime" in item and type(item["managed_runtime"]) is not bool:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "consult_target" in item:
+                target = item["consult_target"]
+                target_keys = frozenset({
+                    "session", "session_generation", "mail_project", "lead", "updated_ts",
+                })
+                target_lead_keys = frozenset({"agent", "mail_name", "participant_id"})
+                if not isinstance(target, dict) or set(target) != target_keys:
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                if any(
+                    not isinstance(target.get(key), str) or not target.get(key)
+                    for key in ("session", "session_generation", "mail_project")
+                ):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+                target_lead = target.get("lead")
+                if (
+                    not isinstance(target_lead, dict)
+                    or set(target_lead) != target_lead_keys
+                    or any(not isinstance(target_lead.get(key), str) for key in target_lead_keys)
+                    or not target_lead.get("mail_name")
+                    or type(target.get("updated_ts")) is bool
+                    or not isinstance(target.get("updated_ts"), (int, float))
+                ):
+                    return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     elif name == "inbox_route":
         work_items = data.get("work_items")
-        if not isinstance(work_items, list):
+        consult_requests = data.get("consult_requests")
+        if not isinstance(work_items, list) or not isinstance(consult_requests, list):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
         required = frozenset({
             "work_id", "hub", "project_slug", "client_session_id", "session",
@@ -1269,6 +1298,49 @@ def _check_versioned_json(
                 handles = response.get("mention_handles")
                 if not isinstance(handles, list) or any(not isinstance(value, str) for value in handles):
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        consult_required = frozenset({
+            "request_id", "work_id", "source_hub", "source_project_slug",
+            "source_human_id", "source_client_session_id", "source_session",
+            "source_session_generation", "source_mail_project", "source_lead_mail_name",
+            "source_lead_agent", "target_session",
+            "target_session_generation", "target_mail_project", "target_lead_mail_name",
+            "target_lead_agent", "kind", "question", "state", "notified",
+            "created_ts", "expires_ts",
+        })
+        consult_optional = frozenset({"response", "failure_reason"})
+        for item in consult_requests:
+            if not isinstance(item, dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            keys = set(item)
+            if not consult_required.issubset(keys):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if keys - consult_required - consult_optional:
+                return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
+            string_keys = consult_required - {
+                "source_human_id", "notified", "created_ts", "expires_ts",
+            }
+            if any(not isinstance(item.get(key), str) or not item.get(key) for key in string_keys):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if type(item.get("source_human_id")) is not int:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if item.get("kind") not in {"status", "decision", "evidence", "blocker"}:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if item.get("state") not in {"pending", "claimed", "responded", "expired", "invalidated"}:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if type(item.get("notified")) is not bool:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if any(
+                type(item.get(key)) is bool or not isinstance(item.get(key), (int, float))
+                for key in ("created_ts", "expires_ts")
+            ):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "response" in item and not isinstance(item["response"], str):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "failure_reason" in item and item["failure_reason"] not in {
+                "source_identity_changed", "target_missing", "target_ambiguous",
+                "target_identity_changed",
+            }:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 
 

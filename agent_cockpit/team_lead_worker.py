@@ -18,12 +18,13 @@ from typing import Any
 from . import runtime_paths
 
 STATE_PATH = runtime_paths.store("inbox_route")
-STATE_VERSION = 4
+STATE_VERSION = 5
+CONSULT_TTL_SECONDS = 10 * 60
 _lock = threading.RLock()
 
 
 def _empty() -> dict[str, Any]:
-    return {"version": STATE_VERSION, "work_items": []}
+    return {"version": STATE_VERSION, "work_items": [], "consult_requests": []}
 
 
 def _load() -> dict[str, Any]:
@@ -44,10 +45,22 @@ def _load() -> dict[str, Any]:
     ):
         return _empty()
     if (
+        isinstance(data, dict)
+        and data.get("version") == 4
+        and isinstance(data.get("work_items"), list)
+    ):
+        return {
+            "version": STATE_VERSION,
+            "work_items": data["work_items"],
+            "consult_requests": [],
+        }
+    if (
         not isinstance(data, dict)
         or data.get("version") != STATE_VERSION
         or not isinstance(data.get("work_items"), list)
         or any(not isinstance(item, dict) for item in data["work_items"])
+        or not isinstance(data.get("consult_requests"), list)
+        or any(not isinstance(item, dict) for item in data["consult_requests"])
     ):
         raise OSError("Team Lead 工作队列格式无效")
     return data
@@ -170,13 +183,17 @@ def reset_notifications() -> None:
             try:
                 legacy = json.loads(STATE_PATH.read_text(encoding="utf-8")).get(
                     "version"
-                ) in {2, 3}
+                ) in {2, 3, 4}
             except (OSError, UnicodeError, ValueError, AttributeError):
                 pass
         data = _load()
         changed = legacy
         for item in data["work_items"]:
             if item.get("state") in {"pending", "responding"} and item.get("notified"):
+                item["notified"] = False
+                changed = True
+        for item in data["consult_requests"]:
+            if item.get("state") in {"pending", "claimed"} and item.get("notified"):
                 item["notified"] = False
                 changed = True
         if changed:
@@ -192,8 +209,14 @@ def discard_bindings(bindings: list[dict[str, Any]]) -> int:
             if not any(_binding_matches(item, binding) for binding in bindings)
         ]
         removed = len(data["work_items"]) - len(kept)
+        kept_consults = [
+            item for item in data["consult_requests"]
+            if not any(_consult_source_matches(item, binding) for binding in bindings)
+        ]
+        removed += len(data["consult_requests"]) - len(kept_consults)
         if removed:
             data["work_items"] = kept
+            data["consult_requests"] = kept_consults
             _write(data)
     return removed
 
@@ -287,6 +310,309 @@ def next_for_binding(binding: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def work_for_binding(work_id: str, binding: dict[str, Any]) -> dict[str, Any] | None:
+    """按不透明工作号读取当前 binding 的工作，不返回本地 capability。"""
+    with _lock:
+        item = next((
+            row for row in _load()["work_items"]
+            if row.get("work_id") == work_id and _binding_matches(row, binding)
+            and row.get("state") in {"pending", "responding"}
+        ), None)
+    if item is None:
+        return None
+    return {
+        "work_id": item.get("work_id"),
+        "reply_mode": item.get("reply_mode"),
+        "message": dict(item.get("message") or {}),
+        "state": item.get("state"),
+    }
+
+
+def _consult_source_matches(item: dict[str, Any], binding: dict[str, Any]) -> bool:
+    lead = binding.get("lead") if isinstance(binding.get("lead"), dict) else {}
+    return all((
+        item.get("source_hub") == binding.get("hub"),
+        item.get("source_human_id") == binding.get("human_id"),
+        item.get("source_project_slug") == binding.get("project_slug"),
+        item.get("source_client_session_id") == binding.get("client_session_id"),
+        item.get("source_session") == binding.get("session"),
+        item.get("source_session_generation") == binding.get("session_generation"),
+        item.get("source_mail_project") == binding.get("mail_project"),
+        item.get("source_lead_mail_name") == lead.get("mail_name"),
+        item.get("source_lead_agent") == lead.get("agent"),
+    ))
+
+
+def _consult_target_matches(item: dict[str, Any], target: dict[str, Any]) -> bool:
+    lead = target.get("lead") if isinstance(target.get("lead"), dict) else {}
+    return all((
+        item.get("target_session") == target.get("session"),
+        item.get("target_session_generation") == target.get("session_generation"),
+        item.get("target_mail_project") == target.get("mail_project"),
+        item.get("target_lead_mail_name") == lead.get("mail_name"),
+        item.get("target_lead_agent") == lead.get("agent"),
+    ))
+
+
+def _expire_consults(data: dict[str, Any], now: float) -> bool:
+    changed = False
+    for item in data["consult_requests"]:
+        if (
+            item.get("state") in {"pending", "claimed"}
+            and float(item.get("expires_ts") or 0) <= now
+        ):
+            item["state"] = "expired"
+            item["notified"] = False
+            changed = True
+    return changed
+
+
+def create_consult(
+    work_id: str,
+    binding: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    kind: str,
+    question: str,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """为一条 Team 工作创建至多一个持久咨询请求。"""
+    if kind not in {"status", "decision", "evidence", "blocker"}:
+        raise ValueError("咨询类型无效")
+    clean_question = question.strip()
+    if not clean_question or len(clean_question) > 2_000:
+        raise ValueError("咨询问题无效")
+    current_time = time.time() if now is None else now
+    with _lock:
+        data = _load()
+        if not any(
+            row.get("work_id") == work_id and _binding_matches(row, binding)
+            for row in data["work_items"]
+        ):
+            raise KeyError("Team Lead 工作不存在")
+        existing = next((
+            row for row in data["consult_requests"]
+            if row.get("work_id") == work_id and _consult_source_matches(row, binding)
+        ), None)
+        if existing is not None:
+            same = (
+                existing.get("kind") == kind
+                and existing.get("question") == clean_question
+                and _consult_target_matches(existing, target)
+            )
+            if not same:
+                raise ValueError("该团队工作已创建不同的咨询请求")
+            return _public_consult(existing, current_time)
+        lead = target.get("lead") if isinstance(target.get("lead"), dict) else {}
+        source_lead = (
+            binding.get("lead") if isinstance(binding.get("lead"), dict) else {}
+        )
+        row = {
+            "request_id": secrets.token_hex(16),
+            "work_id": work_id,
+            "source_hub": binding.get("hub"),
+            "source_human_id": binding.get("human_id"),
+            "source_project_slug": binding.get("project_slug"),
+            "source_client_session_id": binding.get("client_session_id"),
+            "source_session": binding.get("session"),
+            "source_session_generation": binding.get("session_generation"),
+            "source_mail_project": binding.get("mail_project"),
+            "source_lead_mail_name": source_lead.get("mail_name"),
+            "source_lead_agent": source_lead.get("agent"),
+            "target_session": target.get("session"),
+            "target_session_generation": target.get("session_generation"),
+            "target_mail_project": target.get("mail_project"),
+            "target_lead_mail_name": lead.get("mail_name"),
+            "target_lead_agent": lead.get("agent"),
+            "kind": kind,
+            "question": clean_question,
+            "state": "pending",
+            "notified": False,
+            "created_ts": current_time,
+            "expires_ts": current_time + CONSULT_TTL_SECONDS,
+        }
+        data["consult_requests"].append(row)
+        _write(data)
+        return _public_consult(row, current_time)
+
+
+def _public_consult(item: dict[str, Any], now: float) -> dict[str, Any]:
+    state = item.get("state")
+    if state in {"pending", "claimed"} and float(item.get("expires_ts") or 0) <= now:
+        state = "expired"
+    result = {
+        "request_id": item.get("request_id"),
+        "work_id": item.get("work_id"),
+        "kind": item.get("kind"),
+        "question": item.get("question"),
+        "state": state,
+        "created_ts": item.get("created_ts"),
+        "expires_ts": item.get("expires_ts"),
+    }
+    if isinstance(item.get("response"), str):
+        result["response"] = item["response"]
+    if isinstance(item.get("failure_reason"), str):
+        result["failure_reason"] = item["failure_reason"]
+    return result
+
+
+def consult_for_binding(
+    work_id: str, binding: dict[str, Any], *, now: float | None = None,
+) -> dict[str, Any] | None:
+    current_time = time.time() if now is None else now
+    with _lock:
+        data = _load()
+        changed = _expire_consults(data, current_time)
+        item = next((
+            row for row in data["consult_requests"]
+            if row.get("work_id") == work_id and _consult_source_matches(row, binding)
+        ), None)
+        if changed:
+            _write(data)
+    return _public_consult(item, current_time) if item is not None else None
+
+
+def next_consult_for_target(
+    mail_project: str, lead_mail_name: str, *, now: float | None = None,
+) -> dict[str, Any] | None:
+    current_time = time.time() if now is None else now
+    with _lock:
+        data = _load()
+        changed = _expire_consults(data, current_time)
+        rows = [
+            row for row in data["consult_requests"]
+            if row.get("target_mail_project") == mail_project
+            and row.get("target_lead_mail_name") == lead_mail_name
+            and row.get("state") in {"pending", "claimed"}
+        ]
+        item = min(rows, key=lambda row: float(row.get("created_ts") or 0)) if rows else None
+        if item is not None and item.get("state") == "pending":
+            item["state"] = "claimed"
+            changed = True
+        if changed:
+            _write(data)
+    return _public_consult(item, current_time) if item is not None else None
+
+
+def consult_snapshot(request_id: str) -> dict[str, Any] | None:
+    """仅供本机 server 做精确 Session/代际/身份校验，不向 API 暴露。"""
+    with _lock:
+        item = next((
+            row for row in _load()["consult_requests"]
+            if row.get("request_id") == request_id
+        ), None)
+    return dict(item) if item is not None else None
+
+
+def respond_consult(
+    request_id: str,
+    mail_project: str,
+    lead_mail_name: str,
+    response: str,
+    *,
+    now: float | None = None,
+) -> dict[str, Any]:
+    clean = response.strip()
+    if not clean or len(clean) > 10_000:
+        raise ValueError("咨询答复无效")
+    current_time = time.time() if now is None else now
+    with _lock:
+        data = _load()
+        _expire_consults(data, current_time)
+        item = next((
+            row for row in data["consult_requests"]
+            if row.get("request_id") == request_id
+            and row.get("target_mail_project") == mail_project
+            and row.get("target_lead_mail_name") == lead_mail_name
+        ), None)
+        if item is None:
+            raise KeyError("咨询请求不存在")
+        if item.get("state") in {"expired", "invalidated"}:
+            _write(data)
+            raise ValueError("咨询请求已失效")
+        saved = item.get("response")
+        if isinstance(saved, str):
+            if saved != clean:
+                raise ValueError("咨询请求已用不同内容答复")
+            return _public_consult(item, current_time)
+        item["response"] = clean
+        item["state"] = "responded"
+        _write(data)
+        return _public_consult(item, current_time)
+
+
+def pending_consult_notifications(*, now: float | None = None) -> list[dict[str, Any]]:
+    current_time = time.time() if now is None else now
+    with _lock:
+        data = _load()
+        changed = _expire_consults(data, current_time)
+        rows = [
+            dict(row) for row in data["consult_requests"]
+            if row.get("state") in {"pending", "claimed"}
+            and row.get("notified") is not True
+        ]
+        if changed:
+            _write(data)
+    return rows
+
+
+def mark_consult_notified(request_id: str) -> None:
+    with _lock:
+        data = _load()
+        item = next((
+            row for row in data["consult_requests"]
+            if row.get("request_id") == request_id
+            and row.get("state") in {"pending", "claimed"}
+        ), None)
+        if item is not None and item.get("notified") is not True:
+            item["notified"] = True
+            _write(data)
+
+
+def invalidate_consult(request_id: str, reason: str) -> None:
+    if reason not in {
+        "source_identity_changed", "target_missing", "target_ambiguous",
+        "target_identity_changed",
+    }:
+        raise ValueError("咨询失效原因无效")
+    with _lock:
+        data = _load()
+        item = next((
+            row for row in data["consult_requests"]
+            if row.get("request_id") == request_id
+        ), None)
+        if item is not None and item.get("state") in {"pending", "claimed"}:
+            item["state"] = "invalidated"
+            item["failure_reason"] = reason
+            item["notified"] = False
+            _write(data)
+
+
+def invalidate_consults_for_binding(
+    binding: dict[str, Any], reason: str = "target_identity_changed",
+) -> int:
+    if reason not in {
+        "source_identity_changed", "target_missing", "target_ambiguous",
+        "target_identity_changed",
+    }:
+        raise ValueError("咨询失效原因无效")
+    changed = 0
+    with _lock:
+        data = _load()
+        for item in data["consult_requests"]:
+            if (
+                item.get("state") in {"pending", "claimed"}
+                and _consult_source_matches(item, binding)
+            ):
+                item["state"] = "invalidated"
+                item["failure_reason"] = reason
+                item["notified"] = False
+                changed += 1
+        if changed:
+            _write(data)
+    return changed
+
+
 def update_binding_reply_mode(
     *, hub: str, project_slug: str, client_session_id: str, reply_mode: str,
 ) -> int:
@@ -360,6 +686,9 @@ def respond(
         data = _load()
         data["work_items"] = [
             row for row in data["work_items"] if row.get("work_id") != work_id
+        ]
+        data["consult_requests"] = [
+            row for row in data["consult_requests"] if row.get("work_id") != work_id
         ]
         _write(data)
     return {"status": "replied", "message_id": submitted.get("message_id")}

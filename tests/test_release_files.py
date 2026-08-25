@@ -323,7 +323,7 @@ def test_agent_mail_helpers_are_packaged_and_safely_linked():
     tools = ROOT / "agent-mail-tools"
     for name in (
         "am-register", "am-retire", "am-init-project", "mail-send", "mail-recv",
-        "mail-identity-inject", "mail-hook-check",
+        "mail-identity-inject", "mail-hook-check", "team-work", "project-consult",
     ):
         path = tools / name
         assert path.is_file(), f"missing Agent Mail helper: {name}"

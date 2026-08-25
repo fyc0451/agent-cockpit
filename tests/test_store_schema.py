@@ -767,10 +767,10 @@ def test_inbox_route_v2_requires_worker_migration(isolated_roots):
     assert result["reason"] == store_schema.REASON_MIGRATION_REQUIRED
 
 
-def test_inbox_route_v3_work_queue_exact_value_shape(isolated_roots):
+def test_inbox_route_v5_work_and_consult_queue_exact_value_shape(isolated_roots):
     path = runtime_paths.store("inbox_route")
     path.write_text(json.dumps({
-        "version": 3,
+        "version": 5,
         "work_items": [{
             "work_id": "a" * 32,
             "hub": "https://team.example",
@@ -798,6 +798,7 @@ def test_inbox_route_v3_work_queue_exact_value_shape(isolated_roots):
             "notified": False,
             "created_ts": 1.0,
         }],
+        "consult_requests": [],
     }), encoding="utf-8")
 
     assert store_schema._check_versioned_json("inbox_route")["reason"] == (

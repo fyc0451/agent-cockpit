@@ -245,6 +245,21 @@ def bind(
                 effective_auth_expiry = float(saved_expiry)
         if effective_auth_expiry is not None:
             entry["auth_expires_at"] = float(effective_auth_expiry)
+        existing_lead = (
+            existing.get("lead")
+            if existing is not None and isinstance(existing.get("lead"), dict)
+            else {}
+        )
+        same_lead_identity = all(
+            existing_lead.get(key) == entry["lead"].get(key)
+            for key in ("agent", "mail_name", "participant_id")
+        )
+        if (
+            same_lead_identity
+            and existing is not None
+            and isinstance(existing.get("consult_target"), dict)
+        ):
+            entry["consult_target"] = dict(existing["consult_target"])
         data["bindings"] = [
             row for row in data["bindings"]
             if not (
@@ -259,6 +274,61 @@ def bind(
         data["bindings"].append(entry)
         _write(data)
     return dict(entry)
+
+
+def set_consult_target(
+    *,
+    hub: str,
+    human_id: int,
+    project_slug: str,
+    target: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """为一个 Topic 显式选择同项目普通开发 Lead；None 表示关闭咨询。"""
+    normalized: dict[str, Any] | None = None
+    if target is not None:
+        lead = target.get("lead") if isinstance(target.get("lead"), dict) else {}
+        required = (
+            str(target.get("session") or "").strip(),
+            str(target.get("session_generation") or "").strip(),
+            str(target.get("mail_project") or "").strip(),
+            str(lead.get("mail_name") or "").strip(),
+        )
+        if not all(required):
+            raise ValueError("咨询目标无效")
+        normalized = {
+            "session": required[0],
+            "session_generation": required[1],
+            "mail_project": str(Path(required[2]).expanduser().resolve()),
+            "lead": {
+                key: str(lead.get(key) or "")
+                for key in ("agent", "mail_name", "participant_id")
+            },
+            "updated_ts": time.time(),
+        }
+    with _lock:
+        data = _load()
+        row = next((
+            item for item in data["bindings"]
+            if item.get("hub") == hub
+            and item.get("human_id") == human_id
+            and item.get("project_slug") == project_slug
+        ), None)
+        if row is None:
+            raise KeyError("团队项目尚未绑定本机 Session")
+        if normalized is not None and row.get("managed_runtime") is not True:
+            raise ValueError("只有 Topic 专用 Team Agent 可以选择咨询目标")
+        if (
+            normalized is not None
+            and normalized.get("mail_project") != row.get("mail_project")
+        ):
+            raise ValueError("咨询目标必须属于同一项目")
+        if normalized is None:
+            row.pop("consult_target", None)
+        else:
+            row["consult_target"] = normalized
+        row["updated_ts"] = time.time()
+        _write(data)
+        return dict(row)
 
 
 def authorize_human(

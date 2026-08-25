@@ -65,6 +65,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--subject")
     parser.add_argument("--body")
     parser.add_argument(
+        "--consult-kind", choices=("status", "decision", "evidence", "blocker"),
+    )
+    parser.add_argument("--consult-question")
+    parser.add_argument("--consult-status", action="store_true")
+    parser.add_argument(
         "--importance", choices=("low", "normal", "high", "urgent"),
         default="normal",
     )
@@ -75,10 +80,32 @@ def main(argv: list[str] | None = None) -> None:
         "sender_name": identity["name"],
         "registration_token": identity["registration_token"],
     }
+    consulting = any((args.consult_kind, args.consult_question, args.consult_status))
     responding = any((
         args.work_id, args.mention_handles, args.subject, args.body,
-    ))
-    if not responding:
+    )) and not consulting
+    if consulting:
+        if not args.work_id:
+            raise SystemExit("咨询需要提供 --work-id")
+        if args.consult_status:
+            if args.consult_kind or args.consult_question:
+                raise SystemExit("--consult-status 不能和新咨询参数同时使用")
+            result = _post(
+                f"/api/agent/team-work/{quote(args.work_id, safe='')}/consult/status",
+                local_identity,
+            )
+        else:
+            if not args.consult_kind or not args.consult_question:
+                raise SystemExit("新咨询需要同时提供 --consult-kind 和 --consult-question")
+            result = _post(
+                f"/api/agent/team-work/{quote(args.work_id, safe='')}/consult",
+                {
+                    **local_identity,
+                    "kind": args.consult_kind,
+                    "question": args.consult_question,
+                },
+            )
+    elif not responding:
         result = _post("/api/agent/team-work/next", local_identity)
     else:
         if not all((args.work_id, args.mention_handles, args.subject, args.body)):

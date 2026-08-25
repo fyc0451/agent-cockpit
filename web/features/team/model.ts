@@ -26,6 +26,24 @@ export interface TeamBinding {
     mailName: string | null
     status: string | null
   } | null
+  consultTarget?: {
+    session: string
+    ready: boolean
+    reason: string | null
+    lead: {
+      agent: string | null
+      mailName: string | null
+      status: string | null
+    } | null
+  } | null
+}
+
+export interface TeamConsultCandidate {
+  session: string
+  label: string
+  status: string
+  projectRef: string | null
+  leadName: string | null
 }
 
 export interface TeamReplyRequest {

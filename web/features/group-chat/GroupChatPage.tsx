@@ -46,6 +46,7 @@ import {
   listTeamMembers,
   requestTeamJoin,
   sendTeamPresence,
+  setTeamConsultTarget,
 } from '../../api/teamAuth'
 import { TeamTimeline } from '../team/TeamTimeline'
 import type { TeamBinding, TeamMember, TeamTopic } from '../team/model'
@@ -426,6 +427,13 @@ export function GroupChatPage() {
       queryClient.invalidateQueries({ queryKey: ['gc-snapshot'] }),
       queryClient.invalidateQueries({ queryKey: ['gc-chat-ledger'] }),
     ])
+  }, [queryClient])
+
+  const handleTeamSetConsultTarget = useCallback(async (
+    projectSlug: string, session: string | null,
+  ) => {
+    await setTeamConsultTarget(projectSlug, session)
+    await queryClient.invalidateQueries({ queryKey: ['team-bindings'] })
   }, [queryClient])
 
   const handleTeamSelectTopic = useCallback((projectSlug: string) => {
@@ -1273,8 +1281,12 @@ export function GroupChatPage() {
               label: group.label,
             }))}
             teamAvailableAgents={availableAgentKinds}
+            teamConsultTargets={(teamBindingsQ.data?.consultTargets ?? []).filter(
+              (target) => target.projectRef === activeTeamBinding?.projectRef,
+            )}
             onTeamCreateSession={handleTeamCreateSession}
             onTeamDeleteSession={handleTeamDeleteSession}
+            onTeamSetConsultTarget={handleTeamSetConsultTarget}
             onTeamMention={handleTeamMention}
             fileRoot={fileRoot}
             onPreview={setPreviewFile}

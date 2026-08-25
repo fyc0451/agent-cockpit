@@ -30,6 +30,10 @@ def _load_team_work():
     return importlib.reload(importlib.import_module("agent_mail_commands.team_work"))
 
 
+def _load_project_consult():
+    return importlib.reload(importlib.import_module("agent_mail_commands.project_consult"))
+
+
 def _load_tool(name, module_name):
     del module_name
     package_name = name.replace("-", "_").removesuffix(".py")
@@ -105,6 +109,59 @@ def test_team_work_cli_submits_explicit_reply(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "replied" in output
     assert "registration-secret" not in output
+
+
+def test_team_work_cli_creates_and_polls_consult(monkeypatch):
+    module = _load_team_work()
+    monkeypatch.setattr(module, "load_identity", lambda *_args: ({
+        "project_key": PROJECT,
+        "name": "team-main",
+        "registration_token": "team-secret",
+    }, "http://hub", "hub-secret"))
+    calls = []
+    monkeypatch.setattr(
+        module, "_post",
+        lambda path, payload: calls.append((path, payload)) or {"status": "pending"},
+    )
+    work_id = "b" * 32
+
+    module.main([
+        "--agent", "codex", "--project", PROJECT, "--work-id", work_id,
+        "--consult-kind", "status", "--consult-question", "当前状态？",
+    ])
+    module.main([
+        "--agent", "codex", "--project", PROJECT, "--work-id", work_id,
+        "--consult-status",
+    ])
+
+    assert calls[0][0] == f"/api/agent/team-work/{work_id}/consult"
+    assert calls[0][1]["question"] == "当前状态？"
+    assert calls[1][0] == f"/api/agent/team-work/{work_id}/consult/status"
+
+
+def test_project_consult_cli_next_and_exact_response(monkeypatch):
+    module = _load_project_consult()
+    monkeypatch.setattr(module, "load_identity", lambda *_args: ({
+        "project_key": PROJECT,
+        "name": "dev-main",
+        "registration_token": "dev-secret",
+    }, "http://hub", "hub-secret"))
+    calls = []
+    monkeypatch.setattr(
+        module, "_post",
+        lambda path, payload: calls.append((path, payload)) or {"status": "empty"},
+    )
+    request_id = "c" * 32
+
+    module.main(["--agent", "codex", "--project", PROJECT])
+    module.main([
+        "--agent", "codex", "--project", PROJECT,
+        "--request-id", request_id, "--response", "测试通过",
+    ])
+
+    assert calls[0][0] == "/api/agent/project-consult/next"
+    assert calls[1][0] == f"/api/agent/project-consult/{request_id}/respond"
+    assert calls[1][1]["response"] == "测试通过"
 
 
 def test_multiple_panes_bound_to_same_mailbox_are_not_all_woken():

@@ -10,6 +10,7 @@ import {
   listTeamProjects,
   rejectTeamReplyRequest,
   requestTeamJoin,
+  setTeamConsultTarget,
   setTeamReplyMode,
   sendTeamPresence,
   teamChangePassword,
@@ -207,8 +208,20 @@ describe('团队普通成员 API', () => {
             reply_mode: 'auto',
             managed_runtime: true,
             lead: { agent: 'codex', mail_name: 'GoldRiver', status: 'working' },
+            consult_target: {
+              session: 'dev-ready',
+              ready: true,
+              reason: null,
+              lead: { agent: 'codex', mail_name: 'SwiftAnchor', status: 'idle' },
+            },
           },
         ],
+        consult_targets: [{
+          session: 'dev-ready',
+          status: 'idle',
+          lead: { agent: 'codex', mail_name: 'SwiftAnchor', status: 'idle' },
+          project_ref: 'project-ready',
+        }],
       }),
     }))
 
@@ -238,8 +251,18 @@ describe('团队普通成员 API', () => {
           replyMode: 'auto',
           managedRuntime: true,
           lead: { agent: 'codex', mailName: 'GoldRiver', status: 'working' },
+          consultTarget: {
+            session: 'dev-ready',
+            ready: true,
+            lead: { agent: 'codex', mailName: 'SwiftAnchor', status: 'idle' },
+          },
         },
       ],
+      consultTargets: [{
+        session: 'dev-ready',
+        label: 'dev-ready · Lead SwiftAnchor',
+        projectRef: 'project-ready',
+      }],
     })
   })
 
@@ -281,6 +304,28 @@ describe('团队普通成员 API', () => {
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/team-auth/session-bindings/ready?delete_runtime=true',
       { method: 'DELETE', credentials: 'include' },
+    )
+  })
+
+  it('显式保存或关闭同项目普通开发 Lead 咨询目标', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await setTeamConsultTarget('ready', 'dev-ready')
+    await setTeamConsultTarget('ready', null)
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/team-auth/session-bindings/ready/consult-target',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ session: 'dev-ready' }),
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/team-auth/session-bindings/ready/consult-target',
+      expect.objectContaining({ body: JSON.stringify({ session: null }) }),
     )
   })
 

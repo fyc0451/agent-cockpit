@@ -1265,3 +1265,54 @@ def test_one_click_team_session_rejects_agent_without_read_only_mode(monkeypatch
 
     assert response.status_code == 400
     assert "暂不支持 Team Session 只读模式" in response.text
+def test_consult_target_requires_explicit_same_project_ordinary_lead(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    team_sessions.bind(
+        hub=HUB, human_id=7, project_slug="demo", session="team-demo",
+        session_generation="team-run", session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "team-main"},
+        client_session_id="team-client", agent_id=11, managed_runtime=True,
+        reply_token="reply-secret", auth_expires_at=time.time() + 3600,
+    )
+    candidates = [
+        {
+            "session": "team-demo", "generation": "team-run",
+            "mail_project": PROJECT_KEY, "ready": True, "status": "done",
+            "agent_count": 1,
+            "lead": {"agent": "codex", "mail_name": "team-main", "status": "done"},
+        },
+        {
+            "session": "dev-demo", "generation": "dev-run",
+            "mail_project": PROJECT_KEY, "ready": True, "status": "idle",
+            "agent_count": 1,
+            "lead": {
+                "agent": "codex", "mail_name": "dev-main",
+                "participant_id": "dev-lead", "status": "idle",
+            },
+        },
+        {
+            "session": "other", "generation": "other-run",
+            "mail_project": "/work/other", "ready": True, "status": "idle",
+            "agent_count": 1,
+            "lead": {"agent": "codex", "mail_name": "other-main", "status": "idle"},
+        },
+    ]
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: candidates)
+
+    selected = client.patch(
+        "/api/team-auth/session-bindings/demo/consult-target",
+        headers=headers, json={"session": "dev-demo"},
+    )
+    cross_project = client.patch(
+        "/api/team-auth/session-bindings/demo/consult-target",
+        headers=headers, json={"session": "other"},
+    )
+    listed = client.get("/api/team-auth/session-bindings", headers=headers)
+
+    assert selected.status_code == 200
+    assert selected.json()["binding"]["consult_target"]["session"] == "dev-demo"
+    assert cross_project.status_code == 409
+    assert [row["session"] for row in listed.json()["consult_targets"]] == ["dev-demo"]
+    assert PROJECT_KEY not in listed.text

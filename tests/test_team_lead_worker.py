@@ -249,7 +249,9 @@ def test_startup_discards_retired_queue_state(_state, version):
 
     team_lead_worker.reset_notifications()
 
-    assert json.loads(_state.read_text()) == {"version": 4, "work_items": []}
+    assert json.loads(_state.read_text()) == {
+        "version": 5, "work_items": [], "consult_requests": [],
+    }
     assert stat.S_IMODE(_state.stat().st_mode) == 0o600
 
 
@@ -268,3 +270,94 @@ def test_expired_claim_is_renewed_for_same_inbox_item():
 
     assert second["work_id"] == first["work_id"]
     assert "renewed-secret" in team_lead_worker.STATE_PATH.read_text()
+
+
+def _consult_target(**overrides):
+    value = {
+        "session": "dev-demo",
+        "session_generation": "dev-run-1",
+        "mail_project": "/work/demo",
+        "lead": {
+            "agent": "codex",
+            "mail_name": "dev-main",
+            "participant_id": "dev-lead",
+        },
+    }
+    value.update(overrides)
+    return value
+
+
+def _claimed_work():
+    return team_lead_worker.poll_binding(
+        _binding(), _candidate(), claim=lambda *_args: _claim(),
+        notify=lambda *_args: True,
+    )["work_id"]
+
+
+def test_consult_create_and_response_are_exactly_once():
+    work_id = _claimed_work()
+    first = team_lead_worker.create_consult(
+        work_id, _binding(), _consult_target(),
+        kind="evidence", question="当前迁移证据是什么？", now=100.0,
+    )
+    replay = team_lead_worker.create_consult(
+        work_id, _binding(), _consult_target(),
+        kind="evidence", question="当前迁移证据是什么？", now=101.0,
+    )
+
+    assert replay["request_id"] == first["request_id"]
+    assert team_lead_worker.next_consult_for_target(
+        "/work/demo", "dev-main", now=102.0,
+    )["request_id"] == first["request_id"]
+    answered = team_lead_worker.respond_consult(
+        first["request_id"], "/work/demo", "dev-main", "测试已通过", now=103.0,
+    )
+    same = team_lead_worker.respond_consult(
+        first["request_id"], "/work/demo", "dev-main", "测试已通过", now=104.0,
+    )
+    assert answered["state"] == "responded"
+    assert same["response"] == "测试已通过"
+    with pytest.raises(ValueError, match="不同内容"):
+        team_lead_worker.respond_consult(
+            first["request_id"], "/work/demo", "dev-main", "另一答案", now=105.0,
+        )
+
+
+def test_consult_conflict_timeout_and_identity_invalidation_fail_closed():
+    work_id = _claimed_work()
+    created = team_lead_worker.create_consult(
+        work_id, _binding(), _consult_target(),
+        kind="status", question="当前状态？", now=10.0,
+    )
+    with pytest.raises(ValueError, match="不同的咨询"):
+        team_lead_worker.create_consult(
+            work_id, _binding(), _consult_target(),
+            kind="decision", question="是否发布？", now=11.0,
+        )
+    assert team_lead_worker.consult_for_binding(
+        work_id, _binding(), now=10.0 + team_lead_worker.CONSULT_TTL_SECONDS + 1,
+    )["state"] == "expired"
+    with pytest.raises(ValueError, match="已失效"):
+        team_lead_worker.respond_consult(
+            created["request_id"], "/work/demo", "dev-main", "late",
+            now=10.0 + team_lead_worker.CONSULT_TTL_SECONDS + 2,
+        )
+
+
+def test_consult_restart_replays_only_fixed_request_id_notification():
+    work_id = _claimed_work()
+    created = team_lead_worker.create_consult(
+        work_id, _binding(), _consult_target(),
+        kind="blocker", question="包含敏感团队正文", now=100.0,
+    )
+    team_lead_worker.mark_consult_notified(created["request_id"])
+    team_lead_worker.reset_notifications()
+
+    pending = team_lead_worker.pending_consult_notifications(now=101.0)
+
+    assert [row["request_id"] for row in pending] == [created["request_id"]]
+    assert pending[0]["question"] == "包含敏感团队正文"
+    team_lead_worker.invalidate_consults_for_binding(_binding())
+    assert team_lead_worker.consult_for_binding(
+        work_id, _binding(), now=102.0,
+    )["state"] == "invalidated"

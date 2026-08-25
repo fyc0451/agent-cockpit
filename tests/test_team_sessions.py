@@ -107,6 +107,54 @@ def test_reply_token_is_private_and_preserved_on_idempotent_bind(
     assert state.stat().st_mode & 0o777 == 0o600
 
 
+def test_consult_target_is_explicit_and_preserved_only_for_exact_rebind(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
+    _bind()
+    selected = team_sessions.set_consult_target(
+        hub="http://team.example",
+        human_id=7,
+        project_slug="alpha",
+        target={
+            "session": "dev-a",
+            "session_generation": "dev-run-a",
+            "mail_project": "/work/a",
+            "lead": {
+                "agent": "codex",
+                "mail_name": "dev-main",
+                "participant_id": "dev-lead",
+            },
+        },
+    )
+
+    assert selected["consult_target"]["session"] == "dev-a"
+    assert _bind()["consult_target"]["lead"]["mail_name"] == "dev-main"
+    with pytest.raises(ValueError, match="同一项目"):
+        team_sessions.set_consult_target(
+            hub="http://team.example",
+            human_id=7,
+            project_slug="alpha",
+            target={
+                "session": "other-dev",
+                "session_generation": "other-run",
+                "mail_project": "/work/other",
+                "lead": {"agent": "codex", "mail_name": "other-main"},
+            },
+        )
+    changed_identity = _bind(lead={
+        "pane_id": "w1:p3",
+        "agent": "codex",
+        "mail_name": "fresh-main",
+        "participant_id": "fresh-lead",
+    })
+    assert "consult_target" not in changed_identity
+    cleared = team_sessions.set_consult_target(
+        hub="http://team.example", human_id=7, project_slug="alpha", target=None,
+    )
+    assert "consult_target" not in cleared
+
+
 def test_reply_mode_defaults_confirm_and_capability_update_is_atomic(tmp_path, monkeypatch):
     monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
     saved = _bind(reply_token="old-secret")
