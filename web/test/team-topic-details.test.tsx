@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { vi } from 'vitest'
+import { afterEach, vi } from 'vitest'
 import { DetailsPanel } from '../features/group-chat/DetailsPanel'
 import {
   TEAM_BINDINGS_REFRESH_MS,
@@ -8,6 +8,8 @@ import {
 } from '../features/group-chat/GroupChatPage'
 import { AppFrame } from '../features/shell/AppFrame'
 import { renderApp, stubDefaultFetch } from './helpers'
+
+afterEach(() => vi.useRealTimers())
 
 function renderTeamDetails({
   loading = false,
@@ -152,6 +154,51 @@ describe('团队话题成员详情', () => {
       replyMode: 'auto',
       replace: false,
     }))
+  })
+
+  it('Topic Agent 展示上下文新鲜度、SHA 与 handoff 时间', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-25T10:20:35+00:00'))
+    render(
+      <AppFrame sidebar={null}>
+        <DetailsPanel
+          tab="members"
+          onTabChange={vi.fn()}
+          members={[]}
+          session={null}
+          workdir={null}
+          onMention={vi.fn()}
+          onFilter={vi.fn()}
+          onInteract={vi.fn()}
+          onOpenTerminal={vi.fn()}
+          onMembersChanged={vi.fn()}
+          fileRoot={null}
+          onPreview={vi.fn()}
+          teamTopic="ready"
+          teamMembers={[]}
+          teamBinding={{
+            project_slug: 'ready',
+            session: 'team-ready',
+            managedRuntime: true,
+            replyMode: 'auto',
+            context: {
+              freshness: 'current',
+              observedAt: '2026-08-25T10:20:30+00:00',
+              sha: '97dfca2123456789',
+              dirty: true,
+              handoffUpdated: '2026-08-25',
+              fingerprint: 'f'.repeat(64),
+            },
+          }}
+          onTeamCreateSession={vi.fn()}
+        />
+      </AppFrame>,
+    )
+
+    const context = screen.getByLabelText('Topic 项目上下文')
+    expect(within(context).getByText('项目上下文：刚刚同步')).toBeInTheDocument()
+    expect(within(context).getByText(/SHA 97dfca21 · 有未提交变更/)).toBeInTheDocument()
+    expect(within(context).getByText(/handoff 2026-08-25/)).toBeInTheDocument()
   })
 
   it('在 Topic 右侧可停止、解绑并删除专用 Agent，且不暴露内部 Session 名', async () => {

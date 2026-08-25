@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -479,6 +479,43 @@ describe('TeamTimeline', () => {
     expect(screen.getAllByText(question)).toHaveLength(2)
     expect(screen.getByText('回复详情')).toBeInTheDocument()
     expect(screen.getByText('已确认收到。稍后给出排查步骤。')).toBeInTheDocument()
+  })
+
+  it('回复展示固定的项目上下文与开发 Agent 咨询证据', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        messages: [
+          {
+            ...message(71, '已核对并回复', 'Re: 需要核对'),
+            reply_evidence: {
+              context_available: true,
+              context_fingerprint: 'f'.repeat(64),
+              sha: 'a'.repeat(40),
+              dirty: true,
+              handoff_updated: '2026-08-25',
+              consulted: true,
+              created_ts: 1,
+            },
+          },
+          {
+            ...message(72, '伪造证据不展示', 'Re: 另一问题'),
+            reply_evidence: { context_available: true, consulted: true },
+          },
+        ],
+      }),
+    } as Response)))
+
+    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
+
+    const evidence = await screen.findByLabelText('回复证据')
+    expect(evidence).toHaveTextContent('基于项目上下文')
+    expect(evidence).toHaveTextContent('已咨询本地开发 Agent')
+    expect(within(evidence).getByText('基于项目上下文')).toHaveAttribute(
+      'title', expect.stringContaining(`SHA ${'a'.repeat(40)}`),
+    )
+    expect(within(screen.getByTestId('team-msg-72')).queryByLabelText('回复证据')).toBeNull()
   })
 
   it('找不到原问题时保留回复正文', async () => {

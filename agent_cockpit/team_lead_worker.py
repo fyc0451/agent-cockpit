@@ -18,13 +18,19 @@ from typing import Any
 from . import runtime_paths
 
 STATE_PATH = runtime_paths.store("inbox_route")
-STATE_VERSION = 5
+STATE_VERSION = 6
 CONSULT_TTL_SECONDS = 10 * 60
+REPLY_EVIDENCE_LIMIT = 1_000
 _lock = threading.RLock()
 
 
 def _empty() -> dict[str, Any]:
-    return {"version": STATE_VERSION, "work_items": [], "consult_requests": []}
+    return {
+        "version": STATE_VERSION,
+        "work_items": [],
+        "consult_requests": [],
+        "reply_evidence": [],
+    }
 
 
 def _load() -> dict[str, Any]:
@@ -46,13 +52,16 @@ def _load() -> dict[str, Any]:
         return _empty()
     if (
         isinstance(data, dict)
-        and data.get("version") == 4
+        and data.get("version") in {4, 5}
         and isinstance(data.get("work_items"), list)
     ):
         return {
             "version": STATE_VERSION,
             "work_items": data["work_items"],
-            "consult_requests": [],
+            "consult_requests": (
+                data.get("consult_requests", []) if data.get("version") == 5 else []
+            ),
+            "reply_evidence": [],
         }
     if (
         not isinstance(data, dict)
@@ -61,6 +70,8 @@ def _load() -> dict[str, Any]:
         or any(not isinstance(item, dict) for item in data["work_items"])
         or not isinstance(data.get("consult_requests"), list)
         or any(not isinstance(item, dict) for item in data["consult_requests"])
+        or not isinstance(data.get("reply_evidence"), list)
+        or any(not isinstance(item, dict) for item in data["reply_evidence"])
     ):
         raise OSError("Team Lead 工作队列格式无效")
     return data
@@ -183,7 +194,7 @@ def reset_notifications() -> None:
             try:
                 legacy = json.loads(STATE_PATH.read_text(encoding="utf-8")).get(
                     "version"
-                ) in {2, 3, 4}
+                ) in {2, 3, 4, 5}
             except (OSError, UnicodeError, ValueError, AttributeError):
                 pass
         data = _load()
@@ -257,6 +268,8 @@ def poll_binding(
                 claimed["created_ts"] = current.get("created_ts", claimed["created_ts"])
                 claimed["state"] = current.get("state", "pending")
                 claimed["response"] = current.get("response")
+                if isinstance(current.get("context_pack"), dict):
+                    claimed["context_pack"] = current["context_pack"]
                 claimed["notified"] = current.get("notified", False)
                 current.clear()
                 current.update(claimed)
@@ -307,6 +320,74 @@ def next_for_binding(binding: dict[str, Any]) -> dict[str, Any] | None:
         "reply_mode": item.get("reply_mode"),
         "message": dict(item.get("message") or {}),
         "state": item.get("state"),
+    }
+
+
+def attach_context_pack(
+    work_id: str, binding: dict[str, Any], context_pack: dict[str, Any],
+) -> dict[str, Any]:
+    """首次读取时冻结该工作使用的安全上下文包，后续重放保持不变。"""
+    if not isinstance(context_pack, dict):
+        raise ValueError("Team Context Pack 无效")
+    with _lock:
+        data = _load()
+        item = next((
+            row for row in data["work_items"]
+            if row.get("work_id") == work_id and _binding_matches(row, binding)
+            and row.get("state") in {"pending", "responding"}
+        ), None)
+        if item is None:
+            raise KeyError("Team Lead 工作不存在")
+        saved = item.get("context_pack")
+        if isinstance(saved, dict):
+            return dict(saved)
+        item["context_pack"] = dict(context_pack)
+        _write(data)
+        return dict(context_pack)
+
+
+def _reply_context_evidence(context_pack: Any) -> dict[str, Any]:
+    pack = context_pack if isinstance(context_pack, dict) else {}
+    git = pack.get("git") if isinstance(pack.get("git"), dict) else {}
+    handoff = pack.get("handoff") if isinstance(pack.get("handoff"), dict) else {}
+    fingerprint = pack.get("fingerprint")
+    return {
+        "context_available": bool(
+            pack.get("available") is not False
+            and isinstance(fingerprint, str)
+            and len(fingerprint) == 64
+        ),
+        "context_fingerprint": (
+            fingerprint if isinstance(fingerprint, str) and len(fingerprint) == 64 else None
+        ),
+        "sha": (
+            git.get("head")
+            if isinstance(git.get("head"), str) and len(git["head"]) in {40, 64}
+            else None
+        ),
+        "dirty": git.get("dirty") if isinstance(git.get("dirty"), bool) else None,
+        "handoff_updated": (
+            handoff.get("updated") if isinstance(handoff.get("updated"), str) else None
+        ),
+    }
+
+
+def reply_evidence_for_binding(hub: str, project_slug: str) -> dict[int, dict[str, Any]]:
+    """返回本机记录的回复证据；仅含白名单元数据。"""
+    with _lock:
+        rows = [
+            dict(row) for row in _load()["reply_evidence"]
+            if row.get("hub") == hub and row.get("project_slug") == project_slug
+        ]
+    return {
+        int(row["message_id"]): {
+            key: row.get(key) for key in (
+                "context_available", "context_fingerprint", "sha", "dirty",
+                "handoff_updated", "consulted", "created_ts",
+            )
+        }
+        for row in rows
+        if type(row.get("message_id")) is int
     }
 
 
@@ -677,6 +758,35 @@ def respond(
     if snapshot["reply_mode"] not in {"confirm", "auto"}:
         raise ValueError("Team Lead 回复模式无效")
     submitted = direct_reply(project_slug, base)
+    message_id = submitted.get("message_id")
+    if type(message_id) is not int or message_id < 1:
+        raise OSError("Team Hub 回复缺少有效消息 ID")
+    with _lock:
+        data = _load()
+        consulted = any(
+            row.get("work_id") == work_id and row.get("state") == "responded"
+            for row in data["consult_requests"]
+        )
+        evidence = {
+            "hub": binding.get("hub"),
+            "project_slug": project_slug,
+            "message_id": message_id,
+            "work_id": work_id,
+            **_reply_context_evidence(snapshot.get("context_pack")),
+            "consulted": consulted,
+        }
+        existing = next((
+            row for row in data["reply_evidence"]
+            if row.get("hub") == binding.get("hub")
+            and row.get("project_slug") == project_slug
+            and row.get("message_id") == message_id
+        ), None)
+        if existing is None:
+            data["reply_evidence"].append({**evidence, "created_ts": time.time()})
+            data["reply_evidence"] = data["reply_evidence"][-REPLY_EVIDENCE_LIMIT:]
+            _write(data)
+        elif existing.get("work_id") != work_id:
+            raise OSError("Team 回复证据冲突")
     complete(project_slug, inbox_item_id, {
         "client_session_id": str(binding["client_session_id"]),
         "reply_token": str(binding["reply_token"]),
@@ -691,4 +801,4 @@ def respond(
             row for row in data["consult_requests"] if row.get("work_id") != work_id
         ]
         _write(data)
-    return {"status": "replied", "message_id": submitted.get("message_id")}
+    return {"status": "replied", "message_id": message_id}

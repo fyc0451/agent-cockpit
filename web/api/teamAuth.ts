@@ -237,6 +237,7 @@ export async function teamSessionBindings(): Promise<{
         const lead = isObj(item.lead) ? item.lead : null
         const consult = isObj(item.consult_target) ? item.consult_target : null
         const consultLead = consult && isObj(consult.lead) ? consult.lead : null
+        const context = isObj(item.context) ? item.context : null
         bindings.push({
           project_slug,
           session,
@@ -248,6 +249,22 @@ export async function teamSessionBindings(): Promise<{
           automationActive:
             typeof item.automation_active === 'boolean' ? item.automation_active : undefined,
           managedRuntime: item.managed_runtime === true,
+          context: context
+            ? {
+                freshness: context.freshness === 'current' || context.freshness === 'partial'
+                  ? context.freshness
+                  : 'unavailable',
+                observedAt: typeof context.observed_at === 'string' ? context.observed_at : null,
+                sha: typeof context.sha === 'string' ? context.sha : null,
+                dirty: typeof context.dirty === 'boolean' ? context.dirty : null,
+                handoffUpdated: typeof context.handoff_updated === 'string'
+                  ? context.handoff_updated
+                  : null,
+                fingerprint: typeof context.fingerprint === 'string'
+                  ? context.fingerprint
+                  : null,
+              }
+            : null,
           lead: lead
             ? {
                 agent: typeof lead.agent === 'string' ? lead.agent : null,

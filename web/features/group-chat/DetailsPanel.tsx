@@ -38,6 +38,30 @@ function teamAgentStatusLabel(status: string | null | undefined): string {
   return '状态未知'
 }
 
+function teamContextFreshnessLabel(
+  context: NonNullable<TeamBinding['context']>,
+  now = Date.now(),
+): string {
+  if (context.freshness === 'unavailable') return '不可用'
+  const observed = context.observedAt ? new Date(context.observedAt).getTime() : Number.NaN
+  if (!Number.isFinite(observed)) return context.freshness === 'partial' ? '部分可用' : '时间未知'
+  const elapsedSeconds = Math.max(0, Math.floor((now - observed) / 1_000))
+  const age = elapsedSeconds < 15
+    ? '刚刚同步'
+    : elapsedSeconds < 60
+      ? `${elapsedSeconds} 秒前同步`
+      : elapsedSeconds < 300
+        ? `${Math.floor(elapsedSeconds / 60)} 分钟前同步`
+        : '已过期'
+  return context.freshness === 'partial' ? `部分可用 · ${age}` : age
+}
+
+function teamContextObservedLabel(value: string | null): string {
+  if (!value) return '未知'
+  const parsed = new Date(value)
+  return Number.isFinite(parsed.getTime()) ? parsed.toLocaleString() : '未知'
+}
+
 interface DetailsPanelProps {
   tab: DetailsTab
   onTabChange: (tab: DetailsTab) => void
@@ -258,6 +282,22 @@ export function DetailsPanel({
               </summary>
               {(onTeamCreateSession || (teamBinding?.managedRuntime && onTeamSetConsultTarget)) && (
                 <div className={css.teamAgentForm}>
+                  {teamBinding?.context && (
+                    <div className={css.teamContext} aria-label="Topic 项目上下文">
+                      <strong>
+                        项目上下文：{teamContextFreshnessLabel(teamBinding.context)}
+                      </strong>
+                      <span>
+                        SHA {teamBinding.context.sha?.slice(0, 8) || '未知'}
+                        {teamBinding.context.dirty === true ? ' · 有未提交变更' : ''}
+                        {teamBinding.context.dirty === false ? ' · 工作区干净' : ''}
+                      </span>
+                      <span>
+                        handoff {teamBinding.context.handoffUpdated || '未知'}
+                        {' · '}采样 {teamContextObservedLabel(teamBinding.context.observedAt)}
+                      </span>
+                    </div>
+                  )}
                   {onTeamCreateSession && (<>
                     <select aria-label="Topic Agent 工作区" value={teamWorkspaceId} onChange={(event) => setTeamWorkspaceId(event.target.value)} disabled={teamAgentLoading}>
                       {teamWorkspaces.length === 0 && <option value="">没有本地工作区</option>}

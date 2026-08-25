@@ -172,6 +172,11 @@ def test_team_work_body_requires_same_active_local_lead(monkeypatch):
             "fingerprint": "f" * 64,
         },
     )
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "attach_context_pack",
+        lambda _work_id, _binding, pack: pack,
+    )
 
     valid = client.post("/api/agent/team-work/next", json={
         "mail_project": PROJECT,
@@ -213,6 +218,11 @@ def test_team_work_context_pack_failure_is_bounded_and_does_not_hide_work(
         server.team_context_pack,
         "build_context_pack",
         lambda **_kwargs: (_ for _ in ()).throw(OSError("secret path")),
+    )
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "attach_context_pack",
+        lambda _work_id, _binding, pack: pack,
     )
 
     response = client.post("/api/agent/team-work/next", json={

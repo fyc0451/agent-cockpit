@@ -3968,12 +3968,43 @@ async def api_team_proxy(route: str, request: Request):
             }
             if name.lower() in taken:
                 raise HTTPException(409, f"已存在同名 topic「{name}」，请换一个名字")
-        return hub_client.human_api(
+        result = hub_client.human_api(
             method,
             f"/hub/api/{normalized}",
             authorization,
             payload,
         )
+        messages_match = re.fullmatch(
+            r"projects/([A-Za-z0-9_-]+)/chat/messages", normalized,
+        )
+        if method == "GET" and messages_match and isinstance(result, dict):
+            rows = result.get("messages")
+            if isinstance(rows, list):
+                hub = hub_client.public_team_config().get("team_hub")
+                try:
+                    evidence = team_lead_worker.reply_evidence_for_binding(
+                        str(hub or ""), messages_match.group(1),
+                    )
+                except OSError:
+                    logger.warning("Team 回复证据暂时不可读")
+                    evidence = {}
+                result = dict(result)
+                clean_rows = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        clean_rows.append(row)
+                        continue
+                    # Hub 正文不可信：只接受本机按成功回帖 ID 记录的证据。
+                    clean = {
+                        key: value for key, value in row.items()
+                        if key != "reply_evidence"
+                    }
+                    message_id = row.get("id")
+                    if type(message_id) is int and message_id in evidence:
+                        clean["reply_evidence"] = evidence[message_id]
+                    clean_rows.append(clean)
+                result["messages"] = clean_rows
+        return result
     except ValueError as exc:
         raise HTTPException(401, str(exc)) from exc
     except hub_client.HumanAuthError as exc:
@@ -4546,6 +4577,32 @@ def _context_pack_for_binding(binding: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _public_context_summary(binding: dict[str, Any]) -> dict[str, Any]:
+    """Topic UI 使用的白名单摘要；采样时间不进入确定性 Context Pack。"""
+    pack = _context_pack_for_binding(binding)
+    git = pack.get("git") if isinstance(pack.get("git"), dict) else {}
+    handoff = pack.get("handoff") if isinstance(pack.get("handoff"), dict) else {}
+    git_available = git.get("available") is True
+    handoff_available = handoff.get("available") is True
+    return {
+        "freshness": (
+            "current" if git_available and handoff_available
+            else "partial" if git_available or handoff_available
+            else "unavailable"
+        ),
+        "observed_at": datetime.now(UTC).isoformat(),
+        "sha": git.get("head") if isinstance(git.get("head"), str) else None,
+        "dirty": git.get("dirty") if isinstance(git.get("dirty"), bool) else None,
+        "handoff_updated": (
+            handoff.get("updated") if isinstance(handoff.get("updated"), str) else None
+        ),
+        "fingerprint": (
+            pack.get("fingerprint")
+            if isinstance(pack.get("fingerprint"), str) else None
+        ),
+    }
+
+
 def _team_project_ref(value: Any) -> str | None:
     """同项目候选匹配用匿名引用；不向浏览器暴露本机绝对路径。"""
     if not isinstance(value, str) or not value:
@@ -4627,6 +4684,7 @@ def _public_team_session_binding(
         "managed_runtime": managed_runtime,
         "project_ref": _team_project_ref(row.get("mail_project")),
         "updated_ts": row.get("updated_ts"),
+        "context": _public_context_summary(row),
         "consult_target": ({
             "session": saved_consult.get("session"),
             "lead": {
@@ -5473,7 +5531,12 @@ async def api_team_agent_work_next(request: Request):
     except OSError as exc:
         raise HTTPException(503, "团队工作队列暂时不可用") from exc
     if work is not None:
-        work["context_pack"] = _context_pack_for_binding(binding)
+        try:
+            work["context_pack"] = team_lead_worker.attach_context_pack(
+                str(work["work_id"]), binding, _context_pack_for_binding(binding),
+            )
+        except KeyError as exc:
+            raise HTTPException(409, "团队工作已变化，请重新读取") from exc
     return {"status": "pending" if work is not None else "empty", "work": work}
 
 

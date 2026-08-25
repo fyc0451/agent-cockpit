@@ -99,6 +99,24 @@ def _human_api(membership=None, calls=None):
     return call
 
 
+def test_public_context_summary_reports_freshness_sha_and_handoff(monkeypatch):
+    monkeypatch.setattr(server, "_context_pack_for_binding", lambda _binding: {
+        "version": 1,
+        "git": {"available": True, "head": "a" * 40, "dirty": True},
+        "handoff": {"available": True, "updated": "2026-08-25"},
+        "fingerprint": "f" * 64,
+    })
+
+    result = server._public_context_summary({"mail_project": PROJECT_KEY})
+
+    assert result["freshness"] == "current"
+    assert result["sha"] == "a" * 40
+    assert result["dirty"] is True
+    assert result["handoff_updated"] == "2026-08-25"
+    assert result["fingerprint"] == "f" * 64
+    assert result["observed_at"].endswith("+00:00")
+
+
 def test_session_candidates_only_accept_one_lead_and_hide_registry_details(monkeypatch):
     participants = [
         {

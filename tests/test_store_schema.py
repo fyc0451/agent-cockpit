@@ -767,10 +767,10 @@ def test_inbox_route_v2_requires_worker_migration(isolated_roots):
     assert result["reason"] == store_schema.REASON_MIGRATION_REQUIRED
 
 
-def test_inbox_route_v5_work_and_consult_queue_exact_value_shape(isolated_roots):
+def test_inbox_route_v6_work_consult_and_evidence_exact_value_shape(isolated_roots):
     path = runtime_paths.store("inbox_route")
     path.write_text(json.dumps({
-        "version": 5,
+        "version": 6,
         "work_items": [{
             "work_id": "a" * 32,
             "hub": "https://team.example",
@@ -799,10 +799,30 @@ def test_inbox_route_v5_work_and_consult_queue_exact_value_shape(isolated_roots)
             "created_ts": 1.0,
         }],
         "consult_requests": [],
+        "reply_evidence": [{
+            "hub": "https://team.example",
+            "project_slug": "core",
+            "message_id": 77,
+            "work_id": "a" * 32,
+            "context_available": True,
+            "context_fingerprint": "f" * 64,
+            "sha": "a" * 40,
+            "dirty": True,
+            "handoff_updated": "2026-08-25",
+            "consulted": True,
+            "created_ts": 2.0,
+        }],
     }), encoding="utf-8")
 
     assert store_schema._check_versioned_json("inbox_route")["reason"] == (
         store_schema.REASON_COMPATIBLE
+    )
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["reply_evidence"][0]["sha"] = "forged"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert store_schema._check_versioned_json("inbox_route")["reason"] == (
+        store_schema.REASON_FINGERPRINT_MISMATCH
     )
 
 

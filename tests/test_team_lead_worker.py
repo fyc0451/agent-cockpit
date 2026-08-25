@@ -195,6 +195,13 @@ def test_auto_replay_uses_stable_key_and_completes_once_after_retry():
             result["work_id"], _binding(), response,
             direct_reply=direct, complete=complete,
         )
+    consult = team_lead_worker.create_consult(
+        result["work_id"], _binding(), _consult_target(),
+        kind="status", question="重试期间状态？", now=100.0,
+    )
+    team_lead_worker.respond_consult(
+        consult["request_id"], "/work/demo", "dev-main", "已完成", now=101.0,
+    )
     outcome = team_lead_worker.respond(
         result["work_id"], _binding(), response,
         direct_reply=direct, complete=complete,
@@ -204,6 +211,9 @@ def test_auto_replay_uses_stable_key_and_completes_once_after_retry():
     assert len(direct_calls) == 2
     assert direct_calls[0][1]["idempotency_key"] == direct_calls[1][1]["idempotency_key"]
     assert len(complete_calls) == 2
+    assert team_lead_worker.reply_evidence_for_binding(
+        "https://team.example", "core",
+    )[99]["consulted"] is False
 
 
 def test_restart_only_replays_fixed_notification():
@@ -250,9 +260,25 @@ def test_startup_discards_retired_queue_state(_state, version):
     team_lead_worker.reset_notifications()
 
     assert json.loads(_state.read_text()) == {
-        "version": 5, "work_items": [], "consult_requests": [],
+        "version": 6, "work_items": [], "consult_requests": [],
+        "reply_evidence": [],
     }
     assert stat.S_IMODE(_state.stat().st_mode) == 0o600
+
+
+def test_startup_migrates_v5_without_dropping_pending_work(_state):
+    work_id = _claimed_work()
+    legacy = json.loads(_state.read_text())
+    legacy["version"] = 5
+    legacy.pop("reply_evidence")
+    _state.write_text(json.dumps(legacy))
+
+    team_lead_worker.reset_notifications()
+
+    migrated = json.loads(_state.read_text())
+    assert migrated["version"] == 6
+    assert migrated["reply_evidence"] == []
+    assert migrated["work_items"][0]["work_id"] == work_id
 
 
 def test_expired_claim_is_renewed_for_same_inbox_item():
@@ -292,6 +318,88 @@ def _claimed_work():
         _binding(), _candidate(), claim=lambda *_args: _claim(),
         notify=lambda *_args: True,
     )["work_id"]
+
+
+def test_reply_evidence_freezes_first_context_and_records_consult_once():
+    work_id = _claimed_work()
+    pack = {
+        "version": 1,
+        "project": {"key": "demo"},
+        "git": {"available": True, "head": "a" * 40, "dirty": True},
+        "handoff": {"available": True, "updated": "2026-08-25"},
+        "development_lead": {"configured": True, "available": True, "status": "idle"},
+        "fingerprint": "f" * 64,
+    }
+    assert team_lead_worker.attach_context_pack(work_id, _binding(), pack) == pack
+    changed = {**pack, "fingerprint": "e" * 64}
+    assert team_lead_worker.attach_context_pack(work_id, _binding(), changed) == pack
+    consult = team_lead_worker.create_consult(
+        work_id, _binding(), _consult_target(),
+        kind="evidence", question="测试证据？", now=100.0,
+    )
+    team_lead_worker.respond_consult(
+        consult["request_id"], "/work/demo", "dev-main", "已通过", now=101.0,
+    )
+    response = {
+        "subject": "Re: Remote subject", "body_md": "已处理",
+        "importance": "normal", "mention_handles": ["alice"],
+    }
+    complete_calls = []
+
+    def complete(*args):
+        complete_calls.append(args)
+        if len(complete_calls) == 1:
+            raise RuntimeError("retry")
+        return {"status": "completed"}
+
+    with pytest.raises(RuntimeError, match="retry"):
+        team_lead_worker.respond(
+            work_id, _binding(), response,
+            direct_reply=lambda *_args: {"status": "delivered", "message_id": 77},
+            complete=complete,
+        )
+    evidence = team_lead_worker.reply_evidence_for_binding(
+        "https://team.example", "core",
+    )
+    assert evidence[77] == pytest.approx({
+        "context_available": True,
+        "context_fingerprint": "f" * 64,
+        "sha": "a" * 40,
+        "dirty": True,
+        "handoff_updated": "2026-08-25",
+        "consulted": True,
+        "created_ts": evidence[77]["created_ts"],
+    })
+    team_lead_worker.respond(
+        work_id, _binding(), response,
+        direct_reply=lambda *_args: {"status": "delivered", "message_id": 77},
+        complete=complete,
+    )
+    assert list(team_lead_worker.reply_evidence_for_binding(
+        "https://team.example", "core",
+    )) == [77]
+
+
+def test_reply_without_valid_message_id_fails_closed_before_complete():
+    work_id = _claimed_work()
+    response = {
+        "subject": "Re: Remote subject", "body_md": "已处理",
+        "importance": "normal", "mention_handles": ["alice"],
+    }
+    complete_calls = []
+
+    with pytest.raises(OSError, match="有效消息 ID"):
+        team_lead_worker.respond(
+            work_id, _binding(), response,
+            direct_reply=lambda *_args: {"status": "delivered", "message_id": True},
+            complete=lambda *args: complete_calls.append(args),
+        )
+
+    assert complete_calls == []
+    assert team_lead_worker.next_for_binding(_binding())["state"] == "responding"
+    assert team_lead_worker.reply_evidence_for_binding(
+        "https://team.example", "core",
+    ) == {}
 
 
 def test_consult_create_and_response_are_exactly_once():

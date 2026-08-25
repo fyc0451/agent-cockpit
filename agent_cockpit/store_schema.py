@@ -466,7 +466,7 @@ _JSON_VERSIONED: dict[str, int] = {
     "mail_projects": 1,
     "team_messages": 1,
     "team_sessions": 1,
-    "inbox_route": 5,
+    "inbox_route": 6,
     "typing": 1,
 }
 
@@ -1056,7 +1056,9 @@ _JSON_SHAPES: dict[str, frozenset[str]] = {
     "mail_projects": frozenset({"version", "sessions"}),
     "team_messages": frozenset({"version", "messages"}),
     "team_sessions": frozenset({"version", "bindings"}),
-    "inbox_route": frozenset({"version", "work_items", "consult_requests"}),
+    "inbox_route": frozenset({
+        "version", "work_items", "consult_requests", "reply_evidence",
+    }),
 }
 
 
@@ -1234,7 +1236,12 @@ def _check_versioned_json(
     elif name == "inbox_route":
         work_items = data.get("work_items")
         consult_requests = data.get("consult_requests")
-        if not isinstance(work_items, list) or not isinstance(consult_requests, list):
+        reply_evidence = data.get("reply_evidence")
+        if (
+            not isinstance(work_items, list)
+            or not isinstance(consult_requests, list)
+            or not isinstance(reply_evidence, list)
+        ):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
         required = frozenset({
             "work_id", "hub", "project_slug", "client_session_id", "session",
@@ -1242,7 +1249,7 @@ def _check_versioned_json(
             "reply_mode", "inbox_item_id", "claim_token", "claim_expires_at",
             "message", "state", "notified", "created_ts",
         })
-        optional = frozenset({"response"})
+        optional = frozenset({"response", "context_pack"})
         message_keys = frozenset({
             "message_id", "subject", "body_md", "importance", "sender_name",
             "sender_handle", "created_ts",
@@ -1298,6 +1305,8 @@ def _check_versioned_json(
                 handles = response.get("mention_handles")
                 if not isinstance(handles, list) or any(not isinstance(value, str) for value in handles):
                     return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if "context_pack" in item and not isinstance(item["context_pack"], dict):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
         consult_required = frozenset({
             "request_id", "work_id", "source_hub", "source_project_slug",
             "source_human_id", "source_client_session_id", "source_session",
@@ -1340,6 +1349,54 @@ def _check_versioned_json(
                 "source_identity_changed", "target_missing", "target_ambiguous",
                 "target_identity_changed",
             }:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        evidence_keys = frozenset({
+            "hub", "project_slug", "message_id", "work_id", "context_available",
+            "context_fingerprint", "sha", "dirty", "handoff_updated",
+            "consulted", "created_ts",
+        })
+        for item in reply_evidence:
+            if not isinstance(item, dict) or set(item) != evidence_keys:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if any(
+                not isinstance(item.get(key), str) or not item.get(key)
+                for key in ("hub", "project_slug", "work_id")
+            ):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if type(item.get("message_id")) is not int or item["message_id"] < 1:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if re.fullmatch(r"[0-9a-f]{32}", item["work_id"]) is None:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if type(item.get("context_available")) is not bool or type(item.get("consulted")) is not bool:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            fingerprint = item.get("context_fingerprint")
+            if fingerprint is not None and (
+                not isinstance(fingerprint, str)
+                or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+            ):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if item["context_available"] != (fingerprint is not None):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            sha = item.get("sha")
+            if sha is not None and (
+                not isinstance(sha, str)
+                or re.fullmatch(r"[0-9a-f]{40,64}", sha) is None
+            ):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            if item.get("dirty") is not None and type(item["dirty"]) is not bool:
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            handoff_updated = item.get("handoff_updated")
+            if handoff_updated is not None and (
+                not isinstance(handoff_updated, str)
+                or re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T\S{1,64})?", handoff_updated) is None
+            ):
+                return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+            created_ts = item.get("created_ts")
+            if (
+                type(created_ts) is bool
+                or not isinstance(created_ts, (int, float))
+                or not math.isfinite(float(created_ts))
+            ):
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     return _store_result(name, "compatible", REASON_COMPATIBLE)
 

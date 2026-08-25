@@ -2883,6 +2883,21 @@
   word-break: break-word;
 }
 
+.gc-team-reply-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+}
+
+.gc-team-reply-evidence span {
+  padding: 1px 6px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 999px;
+}
+
 .gc-team-reply-detail {
   font-size: 14px;
   color: var(--gc-text);

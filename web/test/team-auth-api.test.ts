@@ -207,6 +207,14 @@ describe('团队普通成员 API', () => {
             reason: 'Session 已停止',
             reply_mode: 'auto',
             managed_runtime: true,
+            context: {
+              freshness: 'current',
+              observed_at: '2026-08-25T10:20:30+00:00',
+              sha: '97dfca2123456789',
+              dirty: true,
+              handoff_updated: '2026-08-25',
+              fingerprint: 'f'.repeat(64),
+            },
             lead: { agent: 'codex', mail_name: 'GoldRiver', status: 'working' },
             consult_target: {
               session: 'dev-ready',
@@ -250,6 +258,14 @@ describe('团队普通成员 API', () => {
           projectRef: null,
           replyMode: 'auto',
           managedRuntime: true,
+          context: {
+            freshness: 'current',
+            observedAt: '2026-08-25T10:20:30+00:00',
+            sha: '97dfca2123456789',
+            dirty: true,
+            handoffUpdated: '2026-08-25',
+            fingerprint: 'f'.repeat(64),
+          },
           lead: { agent: 'codex', mailName: 'GoldRiver', status: 'working' },
           consultTarget: {
             session: 'dev-ready',

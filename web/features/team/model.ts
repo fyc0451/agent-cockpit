@@ -21,6 +21,14 @@ export interface TeamBinding {
   replyMode?: 'confirm' | 'auto'
   automationActive?: boolean
   managedRuntime?: boolean
+  context?: {
+    freshness: 'current' | 'partial' | 'unavailable'
+    observedAt: string | null
+    sha: string | null
+    dirty: boolean | null
+    handoffUpdated: string | null
+    fingerprint: string | null
+  } | null
   lead?: {
     agent: string | null
     mailName: string | null

@@ -252,6 +252,50 @@ def test_hub_chat_history_proxy_does_not_write_local_chat(team_http, monkeypatch
     assert chat_ledger.list_messages("cockpit") == []
 
 
+def test_hub_chat_history_adds_local_reply_evidence_without_changing_hub_row(
+    team_http, monkeypatch,
+):
+    hub_row = {
+        "id": 9, "body_md": "reply", "subject": "Re: question",
+        "reply_evidence": {"consulted": False, "sha": "forged"},
+    }
+    forged_row = {
+        "id": 10, "body_md": "other", "subject": "Re: other",
+        "reply_evidence": {"consulted": True, "sha": "forged"},
+    }
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_api",
+        lambda *_args, **_kwargs: {"messages": [hub_row, forged_row]},
+    )
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "reply_evidence_for_binding",
+        lambda hub, slug: {
+            9: {
+                "context_available": True,
+                "context_fingerprint": "f" * 64,
+                "sha": "a" * 40,
+                "dirty": False,
+                "handoff_updated": "2026-08-25",
+                "consulted": True,
+                "created_ts": 1.0,
+            },
+        } if (hub, slug) == (HUB, "demo") else {},
+    )
+
+    response = team_http["client"].get(
+        "/api/team/projects/demo/chat/messages",
+        headers=team_http["headers"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"][0]["reply_evidence"]["consulted"] is True
+    assert response.json()["messages"][0]["reply_evidence"]["sha"] == "a" * 40
+    assert "reply_evidence" not in response.json()["messages"][1]
+    assert hub_row["reply_evidence"]["sha"] == "forged"
+
+
 def test_unconfigured_hub_keeps_team_ledger_http_absent(isolated_ledger, monkeypatch):
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     settings.update({"team_hub_url": "", "human_auth_url": ""})

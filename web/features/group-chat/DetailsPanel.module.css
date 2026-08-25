@@ -137,6 +137,21 @@
   padding: 0 12px 10px;
 }
 
+.teamContext {
+  display: grid;
+  gap: 2px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-secondary);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.teamContext strong {
+  color: var(--dsw-alias-label-primary);
+}
+
 .teamAgentDelete {
   border-color: var(--dsw-alias-state-error-primary);
   background: transparent;

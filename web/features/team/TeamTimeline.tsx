@@ -389,6 +389,21 @@ export function TeamTimeline({
             ) : (
               <div className="gc-team-msg-body">{row.body_md}</div>
             )}
+            {row.replyEvidence && (
+              <div className="gc-team-reply-evidence" aria-label="回复证据">
+                <span title={[
+                  row.replyEvidence.sha ? `SHA ${row.replyEvidence.sha}` : null,
+                  row.replyEvidence.handoffUpdated
+                    ? `handoff ${row.replyEvidence.handoffUpdated}`
+                    : null,
+                ].filter(Boolean).join(' · ')}>
+                  {row.replyEvidence.contextAvailable
+                    ? '基于项目上下文'
+                    : '项目上下文不可用'}
+                </span>
+                {row.replyEvidence.consulted && <span>已咨询本地开发 Agent</span>}
+              </div>
+            )}
             {request && (
               <div className="gc-team-reply-request" data-testid={`reply-request-${row.id}`}>
                 {request.status === 'awaiting_confirmation'
