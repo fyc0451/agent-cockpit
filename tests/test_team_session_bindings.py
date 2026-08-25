@@ -941,6 +941,150 @@ def test_unbind_only_removes_route_and_deactivates_managed_lead(monkeypatch):
     assert team_sessions.list_bindings(HUB, 7) == []
 
 
+def test_delete_managed_topic_agent_stops_unbinds_then_deletes_runtime(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    events = []
+    def human_api(method, path, authorization, payload=None):
+        if path == "/hub/api/humans/me":
+            return {"id": 7, "display_name": "FYC"}
+        events.append(("remote", method, path, payload))
+        return {}
+
+    monkeypatch.setattr(server.hub_client, "human_api", human_api)
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="team-demo-1",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id="client-run-1",
+        agent_id=41,
+        managed_runtime=True,
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "stop_session",
+        lambda session: events.append(("stop", session))
+        or {"available": True, "stopped": session},
+    )
+    monkeypatch.setattr(
+        server.coordination,
+        "close_session",
+        lambda session, reason: events.append(("coordination", session, reason)),
+    )
+    original_unbind = team_sessions.unbind_project
+    monkeypatch.setattr(
+        team_sessions,
+        "unbind_project",
+        lambda hub, human_id, slug: events.append(("local_unbind", slug))
+        or original_unbind(hub, human_id, slug),
+    )
+    monkeypatch.setattr(
+        server,
+        "api_herdr_session_delete",
+        lambda session: events.append(("delete", session))
+        or {"available": True, "deleted": session},
+    )
+
+    response = client.delete(
+        "/api/team-auth/session-bindings/demo?delete_runtime=true",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "removed": True,
+        "runtime_deleted": True,
+    }
+    assert events == [
+        ("stop", "team-demo-1"),
+        ("coordination", "team-demo-1", "stopped"),
+        (
+            "remote", "DELETE", "/hub/api/projects/demo/session-lead",
+            {"client_session_id": "client-run-1"},
+        ),
+        ("local_unbind", "demo"),
+        ("delete", "team-demo-1"),
+    ]
+    assert team_sessions.list_bindings(HUB, 7) == []
+
+
+def test_delete_managed_topic_agent_stop_failure_keeps_binding(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    remote_calls = []
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="team-demo-1",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id="client-run-1",
+        agent_id=41,
+        managed_runtime=True,
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "stop_session",
+        lambda _session: {"available": True, "error": "busy"},
+    )
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api(calls=remote_calls))
+
+    response = client.delete(
+        "/api/team-auth/session-bindings/demo?delete_runtime=true",
+        headers=headers,
+    )
+
+    assert response.status_code == 502
+    assert "均未删除" in response.json()["detail"]
+    assert not any(path.endswith("/session-lead") for _, path, _, _ in remote_calls)
+    assert len(team_sessions.list_bindings(HUB, 7)) == 1
+
+
+def test_managed_runtime_never_appears_in_ordinary_session_read_model(monkeypatch):
+    monkeypatch.setattr(
+        server.team_sessions,
+        "managed_session_names",
+        lambda: {"team-demo-1"},
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_sessions",
+        lambda: [
+            {"name": "daily-1", "status": "running"},
+            {"name": "team-demo-1", "status": "running"},
+        ],
+    )
+    monkeypatch.setattr(
+        server.chat_ledger,
+        "list_workspaces",
+        lambda: [{"id": "ws-1", "path": PROJECT_KEY, "title": "demo"}],
+    )
+    monkeypatch.setattr(
+        server.chat_ledger,
+        "list_threads",
+        lambda: [
+            {"id": "th-1", "workspace_id": "ws-1", "herdr_session": "daily-1"},
+            {"id": "th-2", "workspace_id": "ws-1", "herdr_session": "team-demo-1"},
+        ],
+    )
+
+    assert [
+        row["name"] for row in server.api_herdr_sessions()["sessions"]
+    ] == ["daily-1"]
+    ledger = server.api_chat_workspaces()
+    assert [row["herdr_session"] for row in ledger["threads"]] == ["daily-1"]
+    assert [
+        row["herdr_session"] for row in ledger["workspaces"][0]["threads"]
+    ] == ["daily-1"]
+
+
 def test_logout_suspends_worker_revokes_remote_capability_and_keeps_binding(
     monkeypatch,
 ):

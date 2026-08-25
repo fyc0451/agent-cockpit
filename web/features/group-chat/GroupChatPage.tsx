@@ -12,7 +12,6 @@ import { TeamAdminPage } from '../../pages/TeamAdminPage'
 import {
   deleteHerdrSession,
   fetchHerdrSessions,
-  isAlreadyStoppedError,
   fetchHerdrSnapshot,
   fetchHerdrStatus,
   stopHerdrSession,
@@ -36,6 +35,7 @@ import {
 import { fetchTeamConfig } from '../../api/teamConfig'
 import {
   createTeamSession,
+  deleteTeamSession,
   teamAuthStatus,
   teamChangePassword,
   teamLogin,
@@ -89,6 +89,7 @@ import {
   parseMentionTargets,
   typingEntries,
   withoutManagedTeamSessions,
+  withoutManagedTeamThreads,
   recallNotice,
   rootBase,
   saveActiveSession,
@@ -417,6 +418,16 @@ export function GroupChatPage() {
     ])
   }, [queryClient])
 
+  const handleTeamDeleteSession = useCallback(async (projectSlug: string) => {
+    await deleteTeamSession(projectSlug)
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['team-bindings'] }),
+      queryClient.invalidateQueries({ queryKey: ['gc-sessions'] }),
+      queryClient.invalidateQueries({ queryKey: ['gc-snapshot'] }),
+      queryClient.invalidateQueries({ queryKey: ['gc-chat-ledger'] }),
+    ])
+  }, [queryClient])
+
   const handleTeamSelectTopic = useCallback((projectSlug: string) => {
     setTeamActiveTopic(projectSlug)
     if (location.pathname !== routePatterns.chat) {
@@ -434,10 +445,15 @@ export function GroupChatPage() {
     [liveRows, teamBindingsQ.data?.bindings],
   )
 
+  const visibleLedgerThreads = useMemo(
+    () => withoutManagedTeamThreads(ledgerThreads, teamBindingsQ.data?.bindings ?? []),
+    [ledgerThreads, teamBindingsQ.data?.bindings],
+  )
+
   // 工作区 = 账本登记；会话按 thread.herdr_session 挂到工作区下
   const { groups: workspaceGroups, ungrouped } = useMemo(
-    () => groupByLedger(visibleLiveRows, ledgerWorkspaces, ledgerThreads),
-    [visibleLiveRows, ledgerWorkspaces, ledgerThreads],
+    () => groupByLedger(visibleLiveRows, ledgerWorkspaces, visibleLedgerThreads),
+    [visibleLiveRows, ledgerWorkspaces, visibleLedgerThreads],
   )
   const rows = useMemo(
     () => [...workspaceGroups.flatMap((g) => g.rows), ...ungrouped],
@@ -1035,14 +1051,6 @@ export function GroupChatPage() {
       if (kind === 'stop') {
         await stopHerdrSession(name)
       } else {
-        const row = rows.find((item) => item.name === name)
-        if (!row || row.status !== 'stopped') {
-          try {
-            await stopHerdrSession(name)
-          } catch (cause) {
-            if (!isAlreadyStoppedError(cause)) throw cause
-          }
-        }
         await deleteHerdrSession(name)
       }
       if (kind === 'delete') {
@@ -1266,6 +1274,7 @@ export function GroupChatPage() {
             }))}
             teamAvailableAgents={availableAgentKinds}
             onTeamCreateSession={handleTeamCreateSession}
+            onTeamDeleteSession={handleTeamDeleteSession}
             onTeamMention={handleTeamMention}
             fileRoot={fileRoot}
             onPreview={setPreviewFile}

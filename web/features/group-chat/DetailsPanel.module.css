@@ -136,3 +136,9 @@
   gap: 6px;
   padding: 0 12px 10px;
 }
+
+.teamAgentDelete {
+  border-color: var(--dsw-alias-state-error-primary);
+  background: transparent;
+  color: var(--dsw-alias-state-error-primary);
+}

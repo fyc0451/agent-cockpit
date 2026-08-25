@@ -505,6 +505,28 @@ export async function createTeamSession(
   return { session: data.session }
 }
 
+export async function deleteTeamSession(projectSlug: string): Promise<void> {
+  const response = await fetch(
+    `/api/team-auth/session-bindings/${encodeURIComponent(projectSlug)}?delete_runtime=true`,
+    { method: 'DELETE', credentials: 'include' },
+  )
+  if (!response.ok) {
+    let message = '删除 Topic Agent 失败'
+    try {
+      const data: unknown = await response.json()
+      if (isObj(data) && typeof data.detail === 'string') message = data.detail
+    } catch {
+      // 非 JSON 错误沿用稳定的用户提示。
+    }
+    throw new ApiError({
+      code: 'team_session_delete_failed',
+      message,
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+}
+
 export async function setTeamReplyMode(
   projectSlug: string,
   replyMode: 'confirm' | 'auto',

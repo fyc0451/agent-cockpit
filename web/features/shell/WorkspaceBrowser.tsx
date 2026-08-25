@@ -833,9 +833,14 @@ function TeamZoneSection({
         type="button"
         onClick={() => { setChangingPassword((value) => !value); setPasswordError(null); setPasswordNotice(null) }}
         title="修改团队登录密码"
-        style={{ ...compactButtonStyle, display: 'block', width: 'calc(100% - 16px)', margin: '0 8px 8px' }}
+        aria-expanded={changingPassword}
+        className={css.accountToggle}
       >
-        {changingPassword ? '收起修改密码' : '修改登录密码'}
+        <IconTriangleRightFill14
+          className={cx(css.accountToggleArrow, changingPassword && css.accountToggleArrowOpen)}
+          size={12}
+        />
+        <span>修改登录密码</span>
       </button>
 
       {changingPassword && (
@@ -870,24 +875,36 @@ function TeamZoneSection({
         const isLegacyBinding = isActive && !!binding && binding.managedRuntime !== true
         const bindingProblem = binding?.reason || '已停止'
         const isJoining = joiningTopic === topic.slug
+        const agentStatus = isBound
+          ? bindingIsLive
+            ? 'Agent 在线'
+            : binding?.reason?.includes('身份')
+              ? 'Agent 待改绑'
+              : 'Agent 已停止'
+          : isLegacyBinding
+            ? '旧绑定待迁移'
+            : isActive
+              ? '未启用 Agent'
+              : isInvited
+                ? '等待审批'
+                : '未加入'
+        const agentTitle = isBound && !bindingIsLive
+          ? `${agentStatus}：${bindingProblem}`
+          : agentStatus
 
         return (
           <div key={topic.slug} style={{ position: 'relative', marginBottom: '2px' }}>
             <button
               type="button"
-              className={cx(css.sessionRow, activeTopic === topic.slug && css.selected)}
+              className={cx(css.sessionRow, css.teamTopicRow, activeTopic === topic.slug && css.selected)}
               onClick={() => isActive && onSelectTopic(topic.slug)}
               disabled={!isActive}
               title={
                 isActive
-                  ? isBound
-                    ? `打开 ${topic.name}（Agent ${binding.session}${bindingIsLive ? '' : `，${bindingProblem}`}）`
-                    : isLegacyBinding
-                      ? `打开 ${topic.name}（旧绑定待迁移）`
-                      : `打开 ${topic.name}（尚未创建 Topic Agent）`
+                  ? `打开 Topic：${topic.name}（${agentTitle}）`
                   : isInvited
-                      ? `${topic.name}（加入申请等待审批）`
-                      : `${topic.name}（尚未加入）`
+                    ? `Topic：${topic.name}（加入申请等待审批）`
+                    : `Topic：${topic.name}（尚未加入）`
               }
               style={{
                 opacity: isActive ? 1 : 0.6,
@@ -897,11 +914,9 @@ function TeamZoneSection({
               <span className={css.slot}>
                 <span className={css.statusDot} data-status={isBound ? 'active' : 'stopped'} />
               </span>
-              <span className={css.title}>{topic.name}</span>
-              <span className={css.meta}>
-                {isBound
-                  ? `→ ${binding.session}${bindingIsLive ? '' : `（${bindingProblem}）`}`
-                  : isLegacyBinding ? '旧绑定待迁移' : isActive ? '未启用 Agent' : isInvited ? '等待审批' : '未加入'}
+              <span className={css.teamTopicMain}>
+                <span className={css.teamTopicName}># {topic.name}</span>
+                <span className={css.teamTopicStatus}>{agentStatus}</span>
               </span>
             </button>
 

@@ -4,6 +4,7 @@ import {
   approveTeamReplyRequest,
   createTeamSession,
   createTeamInvitation,
+  deleteTeamSession,
   listTeamMembers,
   listTeamReplyRequests,
   listTeamProjects,
@@ -269,6 +270,18 @@ describe('团队普通成员 API', () => {
       }),
       credentials: 'include',
     })
+  })
+
+  it('删除 Topic Agent 使用显式 runtime 删除语义', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await deleteTeamSession('ready')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/team-auth/session-bindings/ready?delete_runtime=true',
+      { method: 'DELETE', credentials: 'include' },
+    )
   })
 
   it('回复模式切换与消息级预授权只调用受限 Cockpit 路由', async () => {

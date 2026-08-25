@@ -4,6 +4,7 @@ import threading
 
 import pytest
 import server
+from fastapi import HTTPException
 
 
 INSTANCE_ID = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -150,6 +151,11 @@ def test_delete_session_reports_partial_when_identity_retirement_fails(monkeypat
         "errors": {INSTANCE_ID: "hub down"}, "complete": False,
     }
     monkeypatch.setattr(
+        server.herdr_client, "stop_session",
+        lambda session: events.append(("stop", session))
+        or {"available": True, "stopped": session},
+    )
+    monkeypatch.setattr(
         server, "_mail_project_state",
         lambda session: events.append(("project", session))
         or {"bound": True, "project": "/project"},
@@ -180,10 +186,32 @@ def test_delete_session_reports_partial_when_identity_retirement_fails(monkeypat
     assert result["partial"] is True
     assert result["identity_retirement"] == retirement
     assert events == [
-        ("project", "demo"), ("delete", "demo"),
+        ("stop", "demo"), ("project", "demo"), ("delete", "demo"),
         ("retire", [INSTANCE_ID], "/project"),
         ("coordination", "demo", "deleted"), ("unbind", "demo"),
     ]
+
+
+def test_delete_session_stops_before_delete_and_aborts_on_stop_failure(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server.team_sessions, "managed_binding_for_session", lambda _session: None,
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "stop_session",
+        lambda session: calls.append(("stop", session))
+        or {"available": True, "error": "stop failed"},
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "delete_session",
+        lambda session: calls.append(("delete", session))
+        or {"available": True, "deleted": session},
+    )
+
+    result = server.api_herdr_session_delete("demo")
+
+    assert result["error"] == "stop failed"
+    assert calls == [("stop", "demo")]
 
 
 def test_delete_pane_retires_only_after_close_succeeds(monkeypatch):
@@ -247,6 +275,36 @@ def test_stop_session_never_retires_identity(monkeypatch):
 
     assert server.api_herdr_session_stop("demo")["stopped"] == "demo"
     assert calls == [("demo", "stopped")]
+
+
+@pytest.mark.parametrize("action", ["stop", "delete"])
+def test_active_managed_team_session_cannot_be_stopped_or_deleted(
+    monkeypatch, action,
+):
+    monkeypatch.setattr(
+        server.team_sessions,
+        "managed_binding_for_session",
+        lambda session: {"project_slug": "ready"} if session == "team-ready-1" else None,
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        f"{action}_session",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("当前 Topic Agent 不得被普通会话接口停止或删除")
+        ),
+    )
+
+    endpoint = (
+        server.api_herdr_session_stop
+        if action == "stop"
+        else server.api_herdr_session_delete
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        endpoint("team-ready-1")
+
+    assert exc_info.value.status_code == 409
+    assert "Topic ready" in exc_info.value.detail
+    assert "先在 Topic 中改绑" in exc_info.value.detail
 
 
 def test_identity_retirement_loop_waits_before_retry(monkeypatch):

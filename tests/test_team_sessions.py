@@ -57,6 +57,29 @@ def test_managed_session_matches_exact_bound_generation(tmp_path, monkeypatch):
     assert team_sessions.is_managed_session("workspace-a", "run-a") is False
 
 
+def test_managed_binding_lookup_only_returns_current_managed_runtime(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
+    _bind()
+    _bind(
+        project_slug="legacy",
+        session="legacy-bound",
+        session_generation="legacy-run",
+        client_session_id="legacy-client",
+        managed_runtime=False,
+    )
+
+    assert team_sessions.managed_binding_for_session("workspace-a")["project_slug"] == "alpha"
+    assert team_sessions.managed_session_names() == {"workspace-a"}
+    assert team_sessions.managed_binding_for_session("legacy-bound") is None
+    assert team_sessions.managed_binding_for_session("missing") is None
+
+    team_sessions.unbind_project("http://team.example", 7, "alpha")
+    assert team_sessions.managed_binding_for_session("workspace-a") is None
+    assert team_sessions.managed_session_names() == set()
+
+
 def test_legacy_local_session_binding_is_not_managed_or_worker_eligible(
     tmp_path, monkeypatch,
 ):

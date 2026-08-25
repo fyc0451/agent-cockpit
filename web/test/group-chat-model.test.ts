@@ -2,8 +2,6 @@
 
 import { vi } from 'vitest'
 import { applyMailStreamEvent, fetchSessionMail, mailBelongsToSession, preferLedgerMail } from '../api/chatSession'
-import { isAlreadyStoppedError } from '../api/legacyHerdr'
-import { ApiError } from '../api/client'
 import { computeColumns, shouldOverlayDetails } from '../features/shell/columns'
 import type { HerdrPane } from '../api/legacyHerdr'
 import {
@@ -29,6 +27,7 @@ import {
   diffSummaryLines,
   groupByLedger,
   withoutManagedTeamSessions,
+  withoutManagedTeamThreads,
   leftoverMemberName,
   focusedMemberRecipient,
   loadComposerDraft,
@@ -557,7 +556,7 @@ describe('reflow and fold long waterfall text', () => {
 })
 
 describe('Team 专用运行时隔离', () => {
-  it('只从普通会话列表隐藏明确标记的 Team runtime，旧绑定仍保留', () => {
+  it('从实时列表和账本 thread 隐藏明确标记的 Team runtime，旧绑定仍保留', () => {
     const rows = [
       { name: 'daily', status: 'idle', memberCount: 1, root: '/repo' },
       { name: 'team-ready-1', status: 'working', memberCount: 1, root: '/repo' },
@@ -568,6 +567,15 @@ describe('Team 专用运行时隔离', () => {
       { session: 'team-ready-1', managedRuntime: true },
       { session: 'legacy-bound', managedRuntime: false },
     ]).map((row) => row.name)).toEqual(['daily', 'legacy-bound'])
+
+    expect(withoutManagedTeamThreads([
+      { workspace_id: 'ws-1', herdr_session: 'daily' },
+      { workspace_id: 'ws-1', herdr_session: 'team-ready-1' },
+      { workspace_id: 'ws-1', herdr_session: 'legacy-bound' },
+    ], [
+      { session: 'team-ready-1', managedRuntime: true },
+      { session: 'legacy-bound', managedRuntime: false },
+    ]).map((thread) => thread.herdr_session)).toEqual(['daily', 'legacy-bound'])
   })
 })
 
@@ -600,20 +608,6 @@ describe('groupByLedger', () => {
     expect(groups[1].rows).toEqual([])
     expect(ungrouped.map((r) => r.name)).toEqual(['orphan'])
     expect(ungrouped[0].root).toBeNull()
-  })
-
-  it('已停/不可达的 herdr stop 错误应继续删除', () => {
-    expect(
-      isAlreadyStoppedError(
-        new ApiError({
-          code: 'herdr_error',
-          message:
-            'herdr session stop demo 失败: {"error":{"code":"session_stop_failed","message":"session demo is not running or cannot be reached at /tmp/herdr.sock"}}',
-          retryable: false,
-        }),
-      ),
-    ).toBe(true)
-    expect(isAlreadyStoppedError(new ApiError({ code: 'herdr_error', message: 'busy', retryable: false }))).toBe(false)
   })
 
   it('herdr 已消失的账本 thread 仍显示为已停止，方便再删', () => {

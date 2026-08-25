@@ -154,6 +154,53 @@ describe('团队话题成员详情', () => {
     }))
   })
 
+  it('在 Topic 右侧可停止、解绑并删除专用 Agent，且不暴露内部 Session 名', async () => {
+    const onTeamDeleteSession = vi.fn().mockResolvedValue(undefined)
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(
+      <AppFrame sidebar={null}>
+        <DetailsPanel
+          tab="members"
+          onTabChange={vi.fn()}
+          members={[]}
+          session={null}
+          workdir={null}
+          onMention={vi.fn()}
+          onFilter={vi.fn()}
+          onInteract={vi.fn()}
+          onOpenTerminal={vi.fn()}
+          onMembersChanged={vi.fn()}
+          fileRoot={null}
+          onPreview={vi.fn()}
+          teamTopic="ready"
+          teamMembers={[]}
+          teamBinding={{
+            project_slug: 'ready',
+            session: 'team-agent-internal-1',
+            active: true,
+            ready: true,
+            reason: null,
+            replyMode: 'confirm',
+            managedRuntime: true,
+            lead: { agent: 'codex', mailName: 'GoldRiver', status: 'idle' },
+          }}
+          teamWorkspaces={[{ id: 'ws-ready', label: 'hr-ready' }]}
+          teamAvailableAgents={['codex']}
+          onTeamCreateSession={vi.fn().mockResolvedValue(undefined)}
+          onTeamDeleteSession={onTeamDeleteSession}
+        />
+      </AppFrame>,
+    )
+
+    expect(screen.queryByText('team-agent-internal-1')).not.toBeInTheDocument()
+    await userEvent.setup().click(screen.getByText('我的 Topic Agent'))
+    await userEvent.setup().click(screen.getByRole('button', { name: '删除 Topic Agent' }))
+
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Topic、成员和消息历史都会保留'))
+    await waitFor(() => expect(onTeamDeleteSession).toHaveBeenCalledWith('ready'))
+    confirmSpy.mockRestore()
+  })
+
   it('打开团队话题时从 Team Hub 成员接口取数', async () => {
     window.localStorage.clear()
     window.sessionStorage.clear()
@@ -229,7 +276,7 @@ describe('团队话题成员详情', () => {
     })
 
     renderApp('/chat?session=agent-cockpit-1')
-    const topic = await screen.findByTitle('打开 HR Ready（Agent agent-cockpit-1）')
+    const topic = await screen.findByTitle('打开 Topic：HR Ready（Agent 在线）')
     await userEvent.setup().click(topic)
 
     const panel = await screen.findByLabelText('团队成员')

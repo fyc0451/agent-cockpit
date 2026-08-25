@@ -4889,8 +4889,12 @@ def api_team_session_reply_mode(
 
 
 @app.delete("/api/team-auth/session-bindings/{project_slug}")
-def api_team_session_unbind(project_slug: str, request: Request):
-    """解除本机 Session 路由；不停止 Session、不删除 Agent 或历史消息。"""
+def api_team_session_unbind(
+    project_slug: str,
+    request: Request,
+    delete_runtime: bool = Query(False),
+):
+    """解除路由；显式 delete_runtime 时同时停止并删除 Topic 专用 Agent。"""
     slug = _team_project_slug(project_slug)
     authorization, human = _team_human_context(request)
     hub = hub_client.public_team_config()["team_hub"]
@@ -4900,7 +4904,19 @@ def api_team_session_unbind(project_slug: str, request: Request):
             if row.get("project_slug") == slug
         ), None)
         if current is None:
-            return {"ok": True, "removed": False}
+            return {
+                "ok": True,
+                "removed": False,
+                **({"runtime_deleted": False} if delete_runtime else {}),
+            }
+        if delete_runtime and current.get("managed_runtime") is not True:
+            raise HTTPException(409, "旧绑定使用普通本地会话，只能解除或迁移，不能删除普通会话")
+        runtime_session = str(current.get("session") or "")
+        if delete_runtime:
+            stopped = herdr_client.stop_session(runtime_session)
+            if stopped.get("error") or stopped.get("available") is False:
+                raise HTTPException(502, "Topic Agent 停止失败；绑定和 Session 均未删除")
+            coordination.close_session(runtime_session, "stopped")
         _team_remote_session_unbind(
             authorization, slug, str(current.get("client_session_id") or ""),
         )
@@ -4925,7 +4941,20 @@ def api_team_session_unbind(project_slug: str, request: Request):
             except Exception:
                 logger.exception("本地 Session 解绑失败后的 Hub 补偿失败")
             raise HTTPException(500, "本机 Session 解绑保存失败") from exc
-    return {"ok": True, "removed": bool(removed)}
+    if not delete_runtime:
+        return {"ok": True, "removed": bool(removed)}
+    deleted = api_herdr_session_delete(runtime_session)
+    if deleted.get("error") or deleted.get("available") is False:
+        raise HTTPException(
+            502,
+            "Topic Agent 已停止并解除绑定，但 Session 删除失败；"
+            "它会作为已停止的普通会话显示，可再次删除",
+        )
+    return {
+        "ok": True,
+        "removed": bool(removed),
+        "runtime_deleted": deleted.get("deleted") == runtime_session,
+    }
 
 
 def _team_agent_reply_forbidden() -> HTTPException:
@@ -7945,8 +7974,12 @@ def api_chat_workspaces():
     """侧栏数据源：工作区登记 + 群聊账本。只读，不在 GET 里写账本。"""
     try:
         workspaces = chat_ledger.list_workspaces()
-        threads = chat_ledger.list_threads()
-    except ValueError as exc:
+        managed_sessions = team_sessions.managed_session_names()
+        threads = [
+            row for row in chat_ledger.list_threads()
+            if row.get("herdr_session") not in managed_sessions
+        ]
+    except (OSError, ValueError) as exc:
         raise HTTPException(500, str(exc)) from exc
     by_ws: dict[str, list[dict[str, Any]]] = {}
     for row in threads:
@@ -8733,8 +8766,17 @@ def api_herdr_status():
 
 @app.get("/api/herdr/sessions")
 def api_herdr_sessions():
-    """列出所有 herdr session。"""
-    return {"sessions": herdr_client.list_sessions()}
+    """列出普通 herdr session；当前 Topic 专用 runtime 只在 Topic 中管理。"""
+    try:
+        managed_sessions = team_sessions.managed_session_names()
+    except OSError as exc:
+        raise HTTPException(500, "Team Session 绑定状态不可用") from exc
+    return {
+        "sessions": [
+            row for row in herdr_client.list_sessions()
+            if row.get("name") not in managed_sessions
+        ],
+    }
 
 
 @app.get("/api/herdr/snapshot")
@@ -9244,6 +9286,14 @@ def api_herdr_pane_delete(session: str, pane_id: str):
 def api_herdr_session_stop(name: str):
     """停止 herdr session。"""
     _validate_session_name(name)
+    managed_binding = team_sessions.managed_binding_for_session(name)
+    if managed_binding is not None:
+        project_slug = str(managed_binding.get("project_slug") or "当前 Topic")
+        raise HTTPException(
+            409,
+            f"{name} 是 Topic {project_slug} 当前绑定的专用 Agent；"
+            "请先在 Topic 中改绑，旧会话解绑后再删除",
+        )
     result = herdr_client.stop_session(name)
     if not result.get("error"):
         coordination.close_session(name, "stopped")
@@ -9252,8 +9302,19 @@ def api_herdr_session_stop(name: str):
 
 @app.delete("/api/herdr/session/{name}")
 def api_herdr_session_delete(name: str):
-    """删除已停止的 herdr session。"""
+    """先停止并确认成功，再删除 herdr session。"""
     _validate_session_name(name)
+    managed_binding = team_sessions.managed_binding_for_session(name)
+    if managed_binding is not None:
+        project_slug = str(managed_binding.get("project_slug") or "当前 Topic")
+        raise HTTPException(
+            409,
+            f"{name} 是 Topic {project_slug} 当前绑定的专用 Agent；"
+            "请先在 Topic 中改绑，旧会话解绑后再删除",
+        )
+    stopped = herdr_client.stop_session(name)
+    if stopped.get("error") or stopped.get("available") is False:
+        return stopped
     project_hint = None
     try:
         state = _mail_project_state(name)

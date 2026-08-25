@@ -81,6 +81,32 @@ def is_managed_session(session: str, session_generation: str) -> bool:
     )
 
 
+def managed_binding_for_session(session: str) -> dict[str, Any] | None:
+    """返回当前仍绑定的 Team 专用 Session；普通会话不匹配。"""
+    name = str(session).strip()
+    if not name:
+        return None
+    with _lock:
+        rows = _load()["bindings"]
+    row = next((
+        item for item in rows
+        if item.get("session") == name
+        and item.get("managed_runtime") is True
+    ), None)
+    return dict(row) if row is not None else None
+
+
+def managed_session_names() -> set[str]:
+    """返回当前绑定的 Team 专用 Session 名，供普通会话 read-model 隔离。"""
+    with _lock:
+        rows = _load()["bindings"]
+    return {
+        str(row.get("session"))
+        for row in rows
+        if row.get("managed_runtime") is True and row.get("session")
+    }
+
+
 def conflicts_for(
     *,
     hub: str,

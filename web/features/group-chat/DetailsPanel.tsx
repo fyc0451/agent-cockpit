@@ -70,6 +70,7 @@ interface DetailsPanelProps {
     replyMode: 'confirm' | 'auto'
     replace?: boolean
   }) => Promise<void>
+  onTeamDeleteSession?: (projectSlug: string) => Promise<void>
   // 文件面板：会话/项目目录；没有目录时不展示文件 tab
   fileRoot: string | null
   onPreview: (path: string) => void
@@ -99,6 +100,7 @@ export function DetailsPanel({
   teamWorkspaces = [],
   teamAvailableAgents = [],
   onTeamCreateSession,
+  onTeamDeleteSession,
   fileRoot,
   onPreview,
 }: DetailsPanelProps) {
@@ -165,6 +167,22 @@ export function DetailsPanel({
     }
   }
 
+  const deleteTopicAgent = async () => {
+    if (!teamTopic || !teamBinding?.managedRuntime || !onTeamDeleteSession) return
+    if (!window.confirm(
+      '删除这个 Topic 的本地 Agent？\n\n系统会停止并删除它的专用 Session；Topic、成员和消息历史都会保留。',
+    )) return
+    setTeamAgentLoading(true)
+    setTeamAgentError(null)
+    try {
+      await onTeamDeleteSession(teamTopic)
+    } catch (error) {
+      setTeamAgentError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setTeamAgentLoading(false)
+    }
+  }
+
   return (
     <div className={css.root}>
       <div className={css.tabs} role="tablist" aria-label="会话详情">
@@ -207,7 +225,7 @@ export function DetailsPanel({
                 <span className={css.teamAgentState}>
                   {teamBinding?.managedRuntime ? (
                     <>
-                      {teamBinding.lead?.mailName || teamBinding.session}
+                      {teamBinding.lead?.mailName || '本地 Agent'}
                       {' · '}{teamBinding.lead?.agent || 'Agent'}
                       {' · '}{teamAgentStatusLabel(teamBinding.lead?.status)}
                     </>
@@ -235,6 +253,16 @@ export function DetailsPanel({
                   <button type="button" onClick={() => void createTopicAgent()} disabled={teamAgentLoading || !teamWorkspaceId || selectableTeamAgents.length === 0}>
                     {teamAgentLoading ? '创建中…' : teamBinding ? '迁移 / 更换 Agent' : '创建 Topic Agent'}
                   </button>
+                  {teamBinding?.managedRuntime && onTeamDeleteSession && (
+                    <button
+                      type="button"
+                      className={css.teamAgentDelete}
+                      onClick={() => void deleteTopicAgent()}
+                      disabled={teamAgentLoading}
+                    >
+                      删除 Topic Agent
+                    </button>
+                  )}
                 </div>
               )}
             </details>

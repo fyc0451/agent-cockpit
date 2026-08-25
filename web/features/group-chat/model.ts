@@ -1292,6 +1292,18 @@ export function withoutManagedTeamSessions(
   return rows.filter((row) => !hidden.has(row.name))
 }
 
+export function withoutManagedTeamThreads<T extends { herdr_session: string }>(
+  threads: T[],
+  bindings: Array<{ session: string; managedRuntime?: boolean }>,
+): T[] {
+  const hidden = new Set(
+    bindings
+      .filter((binding) => binding.managedRuntime === true)
+      .map((binding) => binding.session),
+  )
+  return threads.filter((thread) => !hidden.has(thread.herdr_session))
+}
+
 export function buildSessionRows(
   sessions: HerdrSession[],
   snapshot: HerdrSnapshot | null,

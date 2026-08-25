@@ -357,12 +357,6 @@ function assertHerdrMutation(raw: unknown, action: string): void {
   }
 }
 
-/** herdr session stop：已停或 socket 不可达，删除时应继续。 */
-export function isAlreadyStoppedError(error: unknown): boolean {
-  const text = error instanceof ApiError ? error.message : String(error ?? '')
-  return /is not running or cannot be reached|session_stop_failed/i.test(text)
-}
-
 /** 停止 herdr session。进程没了，名字还在，以后可以再 start。 */
 export async function stopHerdrSession(name: string): Promise<unknown> {
   const raw = await legacyPost(`/api/herdr/session/${encodeURIComponent(name)}/stop`, {})
@@ -370,7 +364,7 @@ export async function stopHerdrSession(name: string): Promise<unknown> {
   return raw
 }
 
-/** 删除已停止的 herdr session。若仍在跑，调用方应先 stop。 */
+/** 删除 session。服务端会先停止并确认成功，再执行删除。 */
 export async function deleteHerdrSession(name: string): Promise<unknown> {
   const raw = await legacyDelete(`/api/herdr/session/${encodeURIComponent(name)}`)
   assertHerdrMutation(raw, '删除会话')

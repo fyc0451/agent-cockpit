@@ -111,8 +111,8 @@ describe('WorkspaceBrowser 团队区域', () => {
       />,
     )
     expect(screen.getByText(/test-user/)).toBeInTheDocument()
-    expect(screen.getByText('项目 A')).toBeInTheDocument()
-    expect(screen.getByText('项目 B')).toBeInTheDocument()
+    expect(screen.getByText('# 项目 A')).toBeInTheDocument()
+    expect(screen.getByText('# 项目 B')).toBeInTheDocument()
   })
 
   it('登录用户可直接修改密码且保持当前登录', async () => {
@@ -131,7 +131,11 @@ describe('WorkspaceBrowser 团队区域', () => {
       />,
     )
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: '修改登录密码' }))
+    const passwordToggle = screen.getByRole('button', { name: '修改登录密码' })
+    expect(passwordToggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByLabelText('新团队密码')).not.toBeInTheDocument()
+    await user.click(passwordToggle)
+    expect(passwordToggle).toHaveAttribute('aria-expanded', 'true')
     await user.type(screen.getByLabelText('新团队密码'), 'new-password-1234')
     await user.type(screen.getByLabelText('确认新团队密码'), 'new-password-1234')
     await user.click(screen.getByText('保存新密码'))
@@ -139,20 +143,22 @@ describe('WorkspaceBrowser 团队区域', () => {
     expect(screen.getByText('密码已修改；现有登录保持有效。')).toBeInTheDocument()
   })
 
-  it('话题 Agent 已停止时在列表显示失效状态', () => {
+  it('话题列表显示 Topic 全名和 Agent 状态，不暴露内部 Session 名', () => {
     renderWithAppFrame(
       <WorkspaceBrowser
         {...baseProps}
         teamEnabled={true}
         teamLoggedIn={true}
         teamUsername="test-user"
-        teamTopics={[{ slug: 'proj-a', name: '项目 A', id: 1 }]}
+        teamTopics={[{ slug: 'proj-a', name: '一个很长但必须完整显示的 Topic 名称', id: 1 }]}
         teamBindings={[{ project_slug: 'proj-a', session: 'local-session-1', active: false, managedRuntime: true }]}
         onTeamLogout={vi.fn()}
         onTeamSelectTopic={vi.fn()}
       />,
     )
-    expect(screen.getByText(/local-session-1（已停止）/)).toBeInTheDocument()
+    expect(screen.getByText('# 一个很长但必须完整显示的 Topic 名称')).toBeInTheDocument()
+    expect(screen.getByText('Agent 已停止')).toBeInTheDocument()
+    expect(screen.queryByText(/local-session-1/)).not.toBeInTheDocument()
   })
 
   it('Lead 身份变化时明确提示需要改绑', () => {
@@ -176,7 +182,8 @@ describe('WorkspaceBrowser 团队区域', () => {
       />,
     )
 
-    expect(screen.getByText(/local-session-1（Session 负责人身份已变化，需要重新绑定）/)).toBeInTheDocument()
+    expect(screen.getByText('Agent 待改绑')).toBeInTheDocument()
+    expect(screen.queryByText(/local-session-1/)).not.toBeInTheDocument()
   })
 
   it('active Topic 不依赖 Agent 绑定即可进入统一消息页', async () => {
@@ -197,7 +204,7 @@ describe('WorkspaceBrowser 团队区域', () => {
       />,
     )
 
-    await userEvent.setup().click(screen.getByTitle('打开 hr-ready（尚未创建 Topic Agent）'))
+    await userEvent.setup().click(screen.getByTitle('打开 Topic：hr-ready（未启用 Agent）'))
     expect(onTeamSelectTopic).toHaveBeenCalledWith('ready')
   })
 
@@ -223,7 +230,7 @@ describe('WorkspaceBrowser 团队区域', () => {
       />,
     )
     const user = userEvent.setup()
-    expect(screen.getByTitle('项目 B（加入申请等待审批）')).toBeInTheDocument()
+    expect(screen.getByTitle('Topic：项目 B（加入申请等待审批）')).toBeInTheDocument()
     await user.click(screen.getByTitle('申请加入 项目 A'))
     expect(screen.getByLabelText('项目 A @花名')).toHaveValue('test-user')
     await user.click(screen.getByText('提交申请'))
@@ -240,7 +247,7 @@ describe('WorkspaceBrowser 团队区域', () => {
         />
       </AppFrame>,
     )
-    expect(screen.getByTitle('打开 项目 A（尚未创建 Topic Agent）')).toBeInTheDocument()
+    expect(screen.getByTitle('打开 Topic：项目 A（未启用 Agent）')).toBeInTheDocument()
     expect(screen.queryByTitle('申请加入 项目 A')).not.toBeInTheDocument()
   })
 
