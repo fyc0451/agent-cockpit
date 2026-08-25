@@ -2300,7 +2300,21 @@ def _ensure_kimi_workspace_trusted(canonical_path: str) -> str:
 def _workspace_descriptor_internal_args(record: dict[str, Any]) -> list[str]:
     has_authority = "project_id" in record or "workspace_id" in record
     if not has_authority:
-        return []
+        instance_id = record.get("instance_id")
+        if instance_id is None or record.get("kind") != "codex":
+            return []
+        workdir = record.get("workdir")
+        if (
+            not isinstance(instance_id, str)
+            or _AGENT_INSTANCE_ID_RE.fullmatch(instance_id) is None
+            or record.get("name") != instance_id
+            or not isinstance(workdir, str)
+            or not Path(workdir).is_absolute()
+            or record.get("agent") != "codex"
+            or record.get("state") != "active"
+        ):
+            raise ValueError("managed codex launch descriptor invalid")
+        return _workspace_codex_trust_args(workdir)
     instance_id = record.get("instance_id")
     workdir = record.get("workdir")
     kind = record.get("kind")
@@ -3507,6 +3521,15 @@ def _start_agent_internal(
             "error_code": "workspace_codex_home_invalid",
             "error": "codex home requires exact readonly sandbox args",
         }
+    if managed and canonical_kind == "codex":
+        try:
+            internal_agent_args = _workspace_codex_trust_args(workdir)
+        except ValueError:
+            return {
+                "available": True,
+                "error_code": "workspace_agent_trust_unavailable",
+                "error": "workspace agent trust unavailable",
+            }
     if workspace_managed:
         assert instance_id is not None
         assert project_id is not None and workspace_id is not None
@@ -3525,15 +3548,6 @@ def _start_agent_internal(
                 "error_code": "workspace_agent_layout_forbidden",
                 "error": "workspace managed agent layout must be tab",
             }
-        if canonical_kind == "codex":
-            try:
-                internal_agent_args = _workspace_codex_trust_args(workdir)
-            except ValueError:
-                return {
-                    "available": True,
-                    "error_code": "workspace_agent_trust_unavailable",
-                    "error": "workspace agent trust unavailable",
-                }
         launch_label = _workspace_launch_label(instance_id)
         if any(
             isinstance(item, dict) and item.get("label") == launch_label
