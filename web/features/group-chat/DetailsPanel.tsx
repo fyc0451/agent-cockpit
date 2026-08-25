@@ -44,16 +44,23 @@ function teamContextFreshnessLabel(
 ): string {
   if (context.freshness === 'unavailable') return '不可用'
   const observed = context.observedAt ? new Date(context.observedAt).getTime() : Number.NaN
-  if (!Number.isFinite(observed)) return context.freshness === 'partial' ? '部分可用' : '时间未知'
+  if (!Number.isFinite(observed)) {
+    if (context.freshness === 'partial') return '部分可用'
+    return '时间未知'
+  }
   const elapsedSeconds = Math.max(0, Math.floor((now - observed) / 1_000))
-  const age = elapsedSeconds < 15
-    ? '刚刚同步'
-    : elapsedSeconds < 60
-      ? `${elapsedSeconds} 秒前同步`
-      : elapsedSeconds < 300
-        ? `${Math.floor(elapsedSeconds / 60)} 分钟前同步`
-        : '已过期'
-  return context.freshness === 'partial' ? `部分可用 · ${age}` : age
+  let age: string
+  if (elapsedSeconds < 15) {
+    age = '刚刚同步'
+  } else if (elapsedSeconds < 60) {
+    age = `${elapsedSeconds} 秒前同步`
+  } else if (elapsedSeconds < 300) {
+    age = `${Math.floor(elapsedSeconds / 60)} 分钟前同步`
+  } else {
+    age = '已过期'
+  }
+  if (context.freshness === 'partial') return `部分可用 · ${age}`
+  return age
 }
 
 function teamContextObservedLabel(value: string | null): string {
