@@ -90,6 +90,35 @@ describe('MemberPanel Herdr 终端入口', () => {
     expect(screen.getByRole('radio', { name: /qodercli/ })).toBeInTheDocument()
   })
 
+  it('添加成员只列本机已安装的 Agent CLI', () => {
+    render(
+      <MemberPanel
+        {...baseProps}
+        session="demo-1"
+        availableAgentKinds={['kimi']}
+        onOpenTerminal={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '＋' }))
+    expect(screen.getByRole('radio', { name: /kimi/ })).toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /codex/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /qodercli/ })).not.toBeInTheDocument()
+  })
+
+  it('没有已安装 CLI 时禁止添加并给出安装提示', () => {
+    render(
+      <MemberPanel
+        {...baseProps}
+        session="demo-1"
+        availableAgentKinds={[]}
+        onOpenTerminal={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '＋' }))
+    expect(screen.getByText('未检测到已安装的 Agent CLI。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '添加' })).toBeDisabled()
+  })
+
   it('群成员显示各自 Agent 的矢量图标', () => {
     render(
       <MemberPanel

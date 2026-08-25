@@ -40,6 +40,7 @@ interface DetailsPanelProps {
   onOpenTerminal: () => void
   onMembersChanged: () => void
   externalAddSignal?: number
+  availableAgentKinds?: readonly string[]
   // 团队话题成员：与本机会话 Agent roster 严格分开。
   teamTopic?: string | null
   teamMembers?: TeamMember[]
@@ -65,6 +66,7 @@ export function DetailsPanel({
   onOpenTerminal,
   onMembersChanged,
   externalAddSignal,
+  availableAgentKinds,
   teamTopic = null,
   teamMembers = [],
   teamMembersLoading = false,
@@ -203,6 +205,7 @@ export function DetailsPanel({
             onOpenTerminal={onOpenTerminal}
             onChanged={onMembersChanged}
             externalAddSignal={externalAddSignal}
+            availableAgentKinds={availableAgentKinds}
           />
         )}
       </div>

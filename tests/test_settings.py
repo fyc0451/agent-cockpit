@@ -199,6 +199,11 @@ def test_settings_routes(monkeypatch):
     from fastapi.testclient import TestClient
     import server
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "installed_agent_bins",
+        lambda _names: {"codex": "/opt/agents/codex"},
+    )
     client = TestClient(server.app)
     headers = {"authorization": "Bearer secret"}
 
@@ -207,6 +212,7 @@ def test_settings_routes(monkeypatch):
     body = r.json()
     assert body["language"] == "zh"
     assert "known_agents" in body and "languages" in body
+    assert body["installed_agents"] == ["codex"]
 
     r = client.put("/api/settings", headers=headers, json={"language": "ja"})
     assert r.status_code == 200

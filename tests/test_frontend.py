@@ -2747,6 +2747,23 @@ def test_b1_settings_partial_success_and_single_flight():
     assert body.index("SETTINGS_SAVING=true") < body.index("disabled=true")
     assert 'id="cmpSendBtn"' in js
 
+
+def test_add_agent_only_lists_installed_enabled_clis():
+    js = _inline_js()
+    apply = js.split("function applyEnabledAgents(){", 1)[1].split(
+        "function launchPreselectAgent", 1,
+    )[0]
+    setup = js.split("function setupKnownAgents(){", 1)[1].split(
+        "function setupParticipant", 1,
+    )[0]
+
+    assert "SETTINGS.installed_agents" in apply
+    assert "enabled.filter" in apply
+    assert "未检测到已安装的 Agent CLI" in apply
+    assert "SETTINGS?.installed_agents" in setup
+    assert "known.filter" in setup
+    assert "known.push(selected)" not in js
+
 def test_b1_node_behavior_sse_state_machine():
     """可执行：SSE 三态仅 onopen/事件恢复在线；parse 失败不回绿。"""
     js = _inline_js()

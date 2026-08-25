@@ -73,6 +73,9 @@ export interface Workbench {
 }
 
 export interface Settings {
+  known_agents?: string[]
+  installed_agents?: string[]
+  enabled_agents?: string[]
   harness?: Record<string, unknown>
   runtime?: Record<string, unknown>
   nodes?: unknown[]

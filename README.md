@@ -29,7 +29,7 @@
 
 | 依赖 | 用途 |
 | --- | --- |
-| [herdr](https://herdr.dev) | agent 所在的终端会话 |
+| [herdr](https://herdr.dev) | agent 所在的终端会话；缺失时由安装器自动安装 |
 | Git、Python 3.12+、Node.js 20+（含 npm） | 拉代码、跑服务、编译 `web/dist` |
 | [Agent Mail](https://github.com/fyc0451/mcp_agent_mail) Hub（默认 `:8765`） | 身份和本机协作；安装器会检查、复用或安装 |
 | 至少一个已登录的 Agent CLI | Codex / Claude / Kimi / OpenCode / Grok / Qoder CLI CN |
@@ -60,9 +60,14 @@ cd agent-cockpit
 ./doctor.sh
 ```
 
-安装器会在当前 checkout 建 venv、安装 Agent Mail 命令与本机 Hub、编译
-`web/dist`，并注册 `agent-cockpit.service`（macOS 为 LaunchAgent）。启动后打开
+安装器会在当前 checkout 建 venv，自动安装/复用 Herdr、Agent Mail 命令与本机
+Hub，并为本机检测到的 Agent CLI 安装 Herdr 集成，然后编译 `web/dist`，注册
+`agent-cockpit.service`（macOS 为 LaunchAgent）。启动后打开
 `http://127.0.0.1:8790/#/chat`。重复运行安装器是安全的，可用于修复缺失依赖。
+
+Codex、Claude、Kimi、OpenCode、Grok、Qoder CLI CN 等 **Agent CLI 本身不会由
+Cockpit 安装**，请按需自行安装并完成登录。Cockpit 的「添加成员 / 添加 Agent」
+只显示本机实际存在且可执行的 CLI；新装 CLI 后重跑 `./upgrade.sh` 即可补齐集成。
 
 已经有可用的 Agent Mail Hub 时会复用，不会覆盖手工/远程的
 `~/.agent-mail/client.env`。跳过本机 Hub 时设 `AGENT_MAIL_SKIP_HUB=1`。
@@ -80,6 +85,7 @@ git clone https://github.com/fyc0451/agent-cockpit.git
 cd agent-cockpit
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+./install-herdr.sh .
 ./install-agent-mail-tools.sh .
 ./install-agent-mail-hub.sh
 npm ci --prefix web
@@ -262,6 +268,7 @@ agent-cockpit/
 ├── static/index.html      旧看板残留（安装入口不再启动）
 ├── tests/                 回归与安全测试
 ├── install.sh             3.0 一键安装（build web/dist + dev_server）
+├── install-herdr.sh       自动安装/复用 Herdr，并补齐已安装 CLI 的集成
 ├── upgrade.sh             源码版一键升级与失败回滚
 ├── doctor.sh / uninstall.sh
 ├── agent-cockpit.service  3.0 systemd 单元（ExecStart=dev_server.py）

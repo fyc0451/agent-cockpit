@@ -49,6 +49,7 @@ fi
 "$PYTHON_BIN" -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip
 "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+"$INSTALL_DIR/install-herdr.sh" "$INSTALL_DIR"
 "$INSTALL_DIR/install-agent-mail-tools.sh" "$INSTALL_DIR"
 # 本地 Agent Mail Hub 是前置件：先检查已有 Hub（含远程指向），缺失才安装。
 # 远程 Hub/手工部署场景设 AGENT_MAIL_SKIP_HUB=1 跳过。

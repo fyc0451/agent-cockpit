@@ -9,7 +9,7 @@
 // - workspace detail meta.capabilities 是 files.read / terminal.pty 权威值
 //   （terminal.pty 恒 false=workspace_terminal_ticket_deferred）。
 // - legacy env-check 裸 {herdr,agents,agent_mail}；legacy workbench 裸四键
-//   {project,assignments,sessions,source}。legacyGet 只服务这两条明确路由，
+//   {project,assignments,sessions,source}。legacyGet 只服务三条明确路由，
 //   通用 api/client.ts 不放宽。
 // 纪律：envelope、必填字段与键集绝不宽容（ProtocolError fail-closed）。
 
@@ -36,6 +36,7 @@ export const LOCAL_SLICE_API = {
     `/api/project-registry/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/files/search`,
   legacyWorkbench: (slug: string) => `/api/projects/${encodeURIComponent(slug)}/workbench`,
   legacyEnvCheck: '/api/env-check',
+  legacySettings: '/api/settings',
 } as const
 
 // ---------- Workspace（G3，精确 12 键 public DTO） ----------
@@ -457,7 +458,7 @@ export function assertLegacyEnvCheck(raw: unknown): LegacyEnvCheck {
   }
 }
 
-// ---------- 窄 legacy adapter：仅 env-check 与 workbench 两条明确裸路由 ----------
+// ---------- 窄 legacy adapter：仅 env-check、workbench、settings 三条明确裸路由 ----------
 
 interface LegacyErrorEnvelope {
   error?: {
@@ -668,6 +669,15 @@ export function useLegacyEnvCheck() {
   })
 }
 
+export function useLegacySettings() {
+  return useQuery({
+    queryKey: ['legacy-settings'],
+    queryFn: async () => assertLegacySettings(await legacyGet(LOCAL_SLICE_API.legacySettings)),
+    staleTime: 60_000,
+    retry: shouldRetry,
+  })
+}
+
 // ---------- WEB-004 legacy narrow adapters ----------
 
 import type { Overview, Attention, Settings, Tasks } from './types'
@@ -725,10 +735,12 @@ export function assertLegacyAttention(raw: unknown): Attention {
   return o as unknown as Attention
 }
 
-/** /api/settings → merged settings + known_agents + languages */
+/** /api/settings → merged settings + known/installed agents + languages */
 export function assertLegacySettings(raw: unknown): Settings {
   const o = reqObj(raw, 'settings')
   if (!Array.isArray(o.known_agents) || !o.known_agents.every((v: unknown) => typeof v === 'string')) fail('settings.known_agents')
+  if (!Array.isArray(o.installed_agents) || !o.installed_agents.every((v: unknown) => typeof v === 'string')) fail('settings.installed_agents')
+  if (!Array.isArray(o.enabled_agents) || !o.enabled_agents.every((v: unknown) => typeof v === 'string')) fail('settings.enabled_agents')
   if (!Array.isArray(o.languages) || !o.languages.every((v: unknown) => typeof v === 'string')) fail('settings.languages')
   return o as unknown as Settings
 }

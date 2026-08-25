@@ -72,6 +72,7 @@ export const settingsPayload = {
   human_auth_url: '',
   term: { max_terms: 16, idle_ttl: 1800, write_timeout: 2.0 },
   known_agents: ['codex', 'kimi', 'claude', 'qodercli', 'grok', 'opencode'],
+  installed_agents: ['codex', 'kimi', 'claude', 'qodercli', 'grok', 'opencode'],
   languages: ['zh', 'en', 'ja'],
 }
 

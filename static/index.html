@@ -961,10 +961,8 @@ header .spacer{flex:1}
     <div class="launch-bar" id="launchBar">
       <span class="lbl" data-i18n="launch.label">🚀 启动</span>
       <select id="lnSession" onchange="launchSessionChanged(true)"></select>
-      <select id="lnAgent" onchange="launchRefreshName(true)">
-        <option value="codex">codex</option>
-        <option value="kimi">kimi</option>
-        <option value="qodercli">qoder</option>
+      <select id="lnAgent" onchange="launchRefreshName(true)" disabled>
+        <option value="">正在检测 Agent CLI…</option>
       </select>
       <input id="lnName" placeholder="显示名" aria-label="显示名" oninput="this.dataset.auto='0'" style="max-width:155px">
       <select id="lnLayout" aria-label="新 pane 位置"><option value="tab">新 tab</option><option value="right">右侧 pane</option><option value="down">下方 pane</option></select>
@@ -1511,12 +1509,19 @@ async function saveSettings(){
 function applyEnabledAgents(){
   if(!SETTINGS)return;
   const enabled=SETTINGS.enabled_agents||[];
+  const installed=SETTINGS.installed_agents||[];
+  const choices=enabled.filter(a=>installed.includes(a));
   // 启动栏 agent 下拉只列启用的
   const ln=document.getElementById('lnAgent');
-  if(ln&&enabled.length){
+  if(ln){
     const cur=ln.value;
-    ln.innerHTML=enabled.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
-    ln.value=enabled.includes(cur)?cur:enabled[0];
+    ln.innerHTML=choices.length
+      ?choices.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')
+      :'<option value="">未检测到已安装的 Agent CLI</option>';
+    ln.disabled=!choices.length;
+    const start=document.getElementById('lnStartBtn');if(start)start.disabled=!choices.length;
+    if(!choices.length)return;
+    ln.value=choices.includes(cur)?cur:choices[0];
     launchRefreshName(true);
   }
 }
@@ -1526,7 +1531,7 @@ function launchPreselectAgent(){
   const d=document.getElementById('lnWorkdir').value.trim();
   const a=(SETTINGS.dir_agents||{})[d];
   const ln=document.getElementById('lnAgent');
-  if(a&&ln&&(SETTINGS.enabled_agents||[]).includes(a))ln.value=a;
+  if(a&&ln&&setupKnownAgents().includes(a))ln.value=a;
   launchRefreshName(false);
 }
 function launchRefreshName(force=false){
@@ -4941,9 +4946,10 @@ function agentMailRequirementError(){
   return'';
 }
 function setupKnownAgents(){
-  const known=SETTINGS?.known_agents||['codex','kimi','claude','qoder','grok','opencode'];
+  const known=SETTINGS?.known_agents||[];
   const enabled=SETTINGS?.enabled_agents||known;
-  return known.filter(a=>enabled.includes(a));
+  const installed=SETTINGS?.installed_agents||[];
+  return known.filter(a=>enabled.includes(a)&&installed.includes(a));
 }
 function setupParticipant(agent,role,task,reviewTarget=null,args=''){
   SETUP_AGENT_SEQ++;
@@ -4952,7 +4958,12 @@ function setupParticipant(agent,role,task,reviewTarget=null,args=''){
 }
 function setupMode(mode){
   SETUP_MODE=mode;
-  const known=setupKnownAgents(), first=known[0]||'codex', second=known.find(a=>a!==first);
+  const known=setupKnownAgents(), first=known[0], second=known.find(a=>a!==first);
+  if(!first){
+    SETUP_PARTICIPANTS=[];
+    document.querySelectorAll('#suModeChoices [data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));
+    renderSetupAgents();return;
+  }
   if(mode==='quick'){
     SETUP_PARTICIPANTS=[setupParticipant(first,'lead','')];
   }else if(mode==='develop_review'){
@@ -4973,7 +4984,6 @@ function setupRoleOptions(selected){
 }
 function setupAgentOptions(selected){
   const known=setupKnownAgents();
-  if(!known.includes(selected))known.push(selected);
   return known.map(a=>`<option value="${esc(a)}"${a===selected?' selected':''}>${esc(a)}</option>`).join('');
 }
 function setupWorkspaceOptions(selected){
@@ -5043,6 +5053,7 @@ function setupErrors(){
   if(!workdir)errors.push('请填写工作目录');
   if(!session)errors.push('请填写 session 名');else if(!validSessionName(session))errors.push('session 名只能包含字母、数字、_、-');
   if(!SETUP_PARTICIPANTS.length)errors.push('至少添加一个 Agent');
+  if(SETUP_PARTICIPANTS.some(p=>!setupKnownAgents().includes(p.agent)))errors.push('所选 Agent CLI 未安装或已停用');
   if(SETUP_PARTICIPANTS.some(p=>!String(p.name||'').trim()))errors.push('显示名不能为空');
   if(SETUP_PARTICIPANTS.some(p=>Array.from(String(p.name||'').trim()).length>64||/\p{C}/u.test(String(p.name||''))))errors.push('显示名最长 64 个字符，且不能包含控制字符');
   // task 选填(前后端均已放开)

@@ -12,7 +12,7 @@ import threading
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = (
     "install.sh", "upgrade.sh", "uninstall.sh", "doctor.sh", "launchd.sh",
-    "agent-mail-launchd.sh", "install-agent-mail-tools.sh",
+    "agent-mail-launchd.sh", "install-herdr.sh", "install-agent-mail-tools.sh",
     "install-agent-mail-hub.sh", "agent-mail-run.sh",
 )
 SCRIPT_HELPERS = ("install-paths.sh",)
@@ -337,6 +337,94 @@ def test_agent_mail_helpers_are_packaged_and_safely_linked():
     linker = (ROOT / "install-agent-mail-tools.sh").read_text()
     assert '[[ -f "$target" && ! -L "$target" ]]' in linker
     assert "readlink -f" not in linker
+
+
+def test_install_automatically_installs_herdr_and_detected_integrations():
+    install = (ROOT / "install.sh").read_text()
+    assert '"$INSTALL_DIR/install-herdr.sh" "$INSTALL_DIR"' in install
+
+
+def test_herdr_installer_reuses_binary_and_only_integrates_installed_agents(tmp_path):
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    home.mkdir()
+    fake_bin.mkdir()
+    log = tmp_path / "herdr.log"
+
+    herdr = fake_bin / "herdr"
+    herdr.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"$HERDR_TEST_LOG\"\n"
+    )
+    herdr.chmod(0o755)
+    for name in ("codex", "opencode"):
+        binary = fake_bin / name
+        binary.write_text("#!/usr/bin/env bash\nexit 0\n")
+        binary.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": str(fake_bin) + os.pathsep + "/usr/bin:/bin",
+        "HERDR_TEST_LOG": str(log),
+    }
+    result = subprocess.run(
+        [str(ROOT / "install-herdr.sh"), str(ROOT)],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines()
+    assert calls == [
+        "integration install codex",
+        "integration install opencode",
+    ]
+    assert "claude" not in result.stdout
+    assert "Agent CLI 不由 Cockpit 安装" in result.stdout
+
+
+def test_herdr_installer_downloads_official_installer_when_missing(tmp_path):
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    home.mkdir()
+    fake_bin.mkdir()
+    installer_fixture = tmp_path / "official-install.sh"
+    installer_fixture.write_text(
+        "#!/usr/bin/env sh\n"
+        "mkdir -p \"$HERDR_INSTALL_DIR\"\n"
+        "printf '#!/usr/bin/env sh\\nexit 0\\n' > \"$HERDR_INSTALL_DIR/herdr\"\n"
+        "chmod +x \"$HERDR_INSTALL_DIR/herdr\"\n"
+    )
+    curl = fake_bin / "curl"
+    curl.write_text(
+        "#!/usr/bin/env bash\n"
+        "while [[ $# -gt 0 ]]; do\n"
+        "  if [[ \"$1\" == '-o' ]]; then cp \"$HERDR_INSTALL_FIXTURE\" \"$2\"; exit 0; fi\n"
+        "  shift\n"
+        "done\n"
+        "exit 2\n"
+    )
+    curl.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": str(fake_bin) + os.pathsep + "/usr/bin:/bin",
+        "HERDR_INSTALL_FIXTURE": str(installer_fixture),
+        "HERDR_INSTALL_URL": "https://example.invalid/herdr-install.sh",
+    }
+    result = subprocess.run(
+        [str(ROOT / "install-herdr.sh"), str(ROOT)],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (home / ".local" / "bin" / "herdr").is_file()
+    assert "Herdr 已自动安装" in result.stdout
 
 
 def test_agent_mail_tool_linker_preserves_user_paths_and_updates_legacy(tmp_path):

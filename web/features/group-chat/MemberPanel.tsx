@@ -29,6 +29,7 @@ interface MemberPanelProps {
   onOpenTerminal: () => void
   onChanged: () => void // 成员变更后刷新 snapshot
   externalAddSignal?: number // 输入卡片「＋」快捷入口：值变化即打开添加成员弹窗
+  availableAgentKinds?: readonly string[] // 后端实际检测到的可执行 Agent CLI
 }
 
 function AddMemberModal({
@@ -36,20 +37,26 @@ function AddMemberModal({
   workdir,
   onClose,
   onAdded,
+  availableAgentKinds,
 }: {
   session: string
   workdir: string | null
   onClose: () => void
   onAdded: () => void
+  availableAgentKinds: readonly string[]
 }) {
-  const [kind, setKind] = useState<string>(AGENT_KINDS[0])
+  const [kind, setKind] = useState<string>(availableAgentKinds[0] ?? '')
   const [name, setName] = useState('')
   const [model, setModel] = useState('')
   const [permission, setPermission] = useState<PermissionMode>('ask')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const canSubmit = !busy && !!workdir
+  const canSubmit = !busy && !!workdir && availableAgentKinds.includes(kind)
+
+  useEffect(() => {
+    if (!availableAgentKinds.includes(kind)) setKind(availableAgentKinds[0] ?? '')
+  }, [availableAgentKinds, kind])
 
   const submit = async () => {
     if (!canSubmit || !workdir) return
@@ -92,7 +99,7 @@ function AddMemberModal({
 
         <span className="gc-field-label">Agent 类型</span>
         <div className="gc-agent-grid" role="radiogroup" aria-label="Agent 类型">
-          {AGENT_KINDS.map((k) => (
+          {availableAgentKinds.map((k) => (
             <button
               key={k}
               type="button"
@@ -107,6 +114,9 @@ function AddMemberModal({
             </button>
           ))}
         </div>
+        {!availableAgentKinds.length && (
+          <div className="gc-modal-error">未检测到已安装的 Agent CLI。</div>
+        )}
 
         <span className="gc-field-label">显示名（可选）</span>
         <input
@@ -183,6 +193,7 @@ export function MemberPanel({
   onOpenTerminal,
   onChanged,
   externalAddSignal,
+  availableAgentKinds = AGENT_KINDS,
 }: MemberPanelProps) {
   const [adding, setAdding] = useState(false)
   const [busy, setBusy] = useState<{ paneId: string; kind: 'close' | 'restart' | 'leader' } | null>(null)
@@ -396,6 +407,7 @@ export function MemberPanel({
         <AddMemberModal
           session={session}
           workdir={workdir}
+          availableAgentKinds={availableAgentKinds}
           onClose={() => setAdding(false)}
           onAdded={onChanged}
         />

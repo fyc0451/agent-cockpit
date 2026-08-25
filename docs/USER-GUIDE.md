@@ -66,7 +66,8 @@ Agent Cockpit 是"跑在浏览器里的编码 agent 驾驶舱"：一个浏览器
 ### 2.1 环境要求
 
 - Linux（含 WSL）或 macOS；Python ≥ 3.12；Git；curl
-- 各 agent CLI（codex / kimi / claude / qoder / opencode / grok 等）按需在 PATH；Herdr 可用
+- 各 agent CLI（codex / kimi / claude / qoder / opencode / grok 等）按需自行安装、登录；Cockpit 不代装 Agent CLI
+- Herdr 缺失时由 `install.sh` 使用官方安装器自动安装；已检测到的 Agent CLI 会自动安装对应 Herdr 集成
 - **Agent Mail Hub**（`mcp_agent_mail`，`https://github.com/fyc0451/mcp_agent_mail`）——独立项目，需要一个可访问实例；默认在本机监听 **8765**，也可使用受信任的共享 Hub。`install.sh` 会**先检查再安装**：已配置且探活可用的 Hub（含远程指向）直接复用，不动现有配置；完全缺失时才克隆安装、生成 token、写 `~/.agent-mail/client.env` 并注册托管服务。使用共享 Hub 或手工部署的场景：设 `AGENT_MAIL_SKIP_HUB=1` 运行安装脚本，并自行维护 `client.env`。没有可用 Hub 则无法创建工作区、添加 Agent 或收发 agent 消息。
 
 ### 2.2 安装 Cockpit
@@ -84,7 +85,9 @@ bash install.sh
 ```
 
 install.sh 会校验现有 checkout（只有 curl 直装方式才自动 clone），然后依次：
-校验选定的 Python ≥3.12（默认 `python3`，可用 `PYTHON_BIN` 指定）→ 创建 `.venv` 装依赖 → 安装 Agent Mail 工具（`am-register`/`mail-send`/`mail-recv` 等）到 `~/.local/bin` → **检查/安装本地 Agent Mail Hub**（见 2.1；幂等，失败后重跑会保留 token 自愈）→ 生成 `.env` → 注册并启动服务（Linux 用 systemd 用户服务 `agent-cockpit.service` + `agent-mail.service`；macOS 用 `launchd.sh` 与 agent-mail LaunchAgent）。
+校验选定的 Python ≥3.12（默认 `python3`，可用 `PYTHON_BIN` 指定）→ 创建 `.venv` 装依赖 → **自动安装/复用 Herdr，并为本机已安装的 Agent CLI 执行官方 integration install** → 安装 Agent Mail 工具（`am-register`/`mail-send`/`mail-recv` 等）到 `~/.local/bin` → **检查/安装本地 Agent Mail Hub**（见 2.1；幂等，失败后重跑会保留 token 自愈）→ 生成 `.env` → 注册并启动服务（Linux 用 systemd 用户服务 `agent-cockpit.service` + `agent-mail.service`；macOS 用 `launchd.sh` 与 agent-mail LaunchAgent）。
+
+系统级前置仍需用户准备：Git、curl、Python 3.12+、Node.js 20+ 与 npm。安装器不会使用 sudo，也不会猜测 apt/Homebrew 策略。Agent CLI 本身同样不代装；添加 Agent 时只会列出本机实际可执行的 CLI。安装新 CLI 后运行 `bash upgrade.sh`，即可自动补齐 Herdr 集成并重建服务。
 
 ### 2.3 配置文件 `.env`
 
@@ -186,7 +189,7 @@ cat ~/.agent-mail/registry/<项目slug>/kimi--main.json   # name 字段即花名
 ### 4.2 启动工作区
 
 - **新建工作区**：工作台 →「会话」→「＋ 一键工作区」，选择协作方式、Agent、角色、工作目录和布局；Cockpit 自动创建 session/pane、启动 Agent、注册邮箱身份并通知协作者。
-- **给现有工作区加 Agent**：先在开发页打开目标终端，再点「＋ 添加 Agent」；表单默认选中当前 session，可选择 Agent 类型、实例名、工作目录、任务（选填）和启动参数（选填）。同类型可以添加多个实例。
+- **给现有工作区加 Agent**：先在开发页打开目标终端，再点「＋ 添加 Agent」；Agent 类型只列本机已安装且可执行的 CLI。表单默认选中当前 session，可填写实例名、工作目录、任务（选填）和启动参数（选填）。同类型可以添加多个实例。若列表为空，先安装并登录至少一个 Agent CLI，再运行 `bash upgrade.sh`。
 
 工作区准备或启动失败会回滚；若仅身份注册/通知失败，Agent 会保留运行并在结果中显示警告，便于修好 Hub 后补注册。重启、停止、删除等整体管理仍在「工作台 → 会话」tab。
 

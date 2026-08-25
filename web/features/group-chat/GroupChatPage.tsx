@@ -51,6 +51,7 @@ import { TeamTimeline } from '../team/TeamTimeline'
 import type { TeamBinding, TeamMember, TeamSessionCandidate, TeamTopic } from '../team/model'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
+import { useLegacySettings } from '../../api/localSlice'
 import { AppFrame, useAppFrame } from '../shell/AppFrame'
 import { SidebarRoot } from '../shell/SidebarRoot'
 import { WorkspaceBrowser } from '../shell/WorkspaceBrowser'
@@ -95,6 +96,7 @@ import {
   withLeader,
   type ChatDelivery,
   type ChatMember,
+  AGENT_KINDS,
 } from './model'
 import './groupChat.css'
 
@@ -227,6 +229,11 @@ export function GroupChatPage() {
   const isTeamAdmin = location.pathname === routePatterns.team
   const [searchParams, setSearchParams] = useSearchParams()
   const urlSession = searchParams.get('session')
+  const settingsQ = useLegacySettings()
+  const availableAgentKinds = AGENT_KINDS.filter(
+    (kind) => settingsQ.data?.installed_agents?.includes(kind)
+      && settingsQ.data?.enabled_agents?.includes(kind),
+  )
 
   // ---------- 数据源轮询 ----------
   // next profile 单会话作用域：status.scopedSession 非空时新会话名只能用它
@@ -1200,6 +1207,7 @@ export function GroupChatPage() {
             onOpenTerminal={() => { if (activeSession) setTerminalSession(activeSession) }}
             onMembersChanged={() => { queryClient.invalidateQueries({ queryKey: ['gc-snapshot'] }) }}
             externalAddSignal={addMemberKey}
+            availableAgentKinds={availableAgentKinds}
             teamTopic={teamActiveTopic}
             teamMembers={teamMembersQ.data ?? []}
             teamMembersLoading={teamMembersQ.isPending && !!teamActiveTopic}

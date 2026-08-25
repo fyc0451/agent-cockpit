@@ -3744,9 +3744,11 @@ def api_theme_herdr(req: ThemeHerdrReq):
 @app.get("/api/settings")
 def api_settings_get():
     """读用户配置(附 known agent 类型与语言枚举,供设置页渲染)。"""
+    installed = herdr_client.installed_agent_bins(settings.KNOWN_AGENTS)
     return {
         **settings.get(),
         "known_agents": settings.KNOWN_AGENTS,
+        "installed_agents": list(installed),
         "languages": settings.LANGUAGES,
     }
 
@@ -5394,12 +5396,11 @@ def api_team_auth_approve_user_and_team(username: str, request: Request):
 def api_env_check():
     """环境自检:herdr / 各 agent 可执行文件 / Agent Mail 是否就绪(设置页展示)。"""
     herdr_ok = herdr_client.is_available()
+    installed = herdr_client.installed_agent_bins(settings.KNOWN_AGENTS)
     agents = {}
     for name in settings.KNOWN_AGENTS:
-        path = herdr_client._find_agent_bin(name)
-        # _find_agent_bin 找不到时兜底返回裸名,用"仍是裸名"判断未安装
-        installed = path != name and Path(path).is_file()
-        agents[name] = {"installed": installed, "path": path if installed else ""}
+        path = installed.get(name, "")
+        agents[name] = {"installed": bool(path), "path": path}
     return {
         "herdr": {"installed": herdr_ok, "path": herdr_client.HERDR_BIN if herdr_ok else ""},
         "agents": agents,

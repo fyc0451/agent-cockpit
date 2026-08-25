@@ -24,6 +24,7 @@ def test_env_check_reports_component_status(monkeypatch, tmp_path):
     # 只有一个 agent "已安装"(落在真实路径),其余 _find_agent_bin 兜底裸名
     kimi = tmp_path / "kimi"
     kimi.write_text("#!/bin/sh\n")
+    kimi.chmod(0o755)
 
     def fake_find(name: str) -> str:
         return str(kimi) if name == "kimi" else name
@@ -40,6 +41,24 @@ def test_env_check_reports_component_status(monkeypatch, tmp_path):
     assert data["agents"]["kimi"] == {"installed": True, "path": str(kimi)}
     assert data["agents"]["codex"] == {"installed": False, "path": ""}
     assert data["agent_mail"]["available"] is False
+
+
+def test_installed_agent_bins_requires_executable(monkeypatch, tmp_path):
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    regular = tmp_path / "kimi"
+    regular.write_text("not executable\n")
+
+    monkeypatch.setattr(
+        herdr_client,
+        "_find_agent_bin",
+        lambda name: str(executable if name == "codex" else regular),
+    )
+
+    assert herdr_client.installed_agent_bins(["codex", "kimi"]) == {
+        "codex": str(executable),
+    }
 
 
 def test_env_check_herdr_missing(monkeypatch):

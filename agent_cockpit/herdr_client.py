@@ -27,7 +27,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, Iterable, NamedTuple
 
 from . import next_profile
 
@@ -258,6 +258,16 @@ def _find_agent_bin(name: str) -> str:
         if p and Path(p).is_file():
             return str(p)
     return name  # 最后兜底用裸名
+
+
+def installed_agent_bins(names: Iterable[str]) -> dict[str, str]:
+    """返回本机确实存在且可执行的 Agent CLI，保持传入顺序。"""
+    installed: dict[str, str] = {}
+    for name in names:
+        path = _find_agent_bin(name)
+        if path != name and Path(path).is_file() and os.access(path, os.X_OK):
+            installed[name] = path
+    return installed
 
 
 # agent 类型 → 启动命令构造器
