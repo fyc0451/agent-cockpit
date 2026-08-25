@@ -2342,6 +2342,7 @@ async function refreshBoard(){
   try{
     const d=await api('/api/herdr/snapshot');
     if(seq!==BOARD_LOAD_SEQ)return;
+    applyLaunchIdentityOverlays(d);
     BOARD=d;
     renderBoard(d);
     launchSessionChanged(false);
@@ -2823,6 +2824,52 @@ function launchWorktreePreview(){
     '独立模式：从上方源仓库创建系统命名的隔离 worktree');
   el.style.display='';
 }
+const LAUNCH_IDENTITY_OVERLAYS=new Map();
+const LAUNCH_IDENTITY_OVERLAY_TTL_MS=20000;
+function launchIdentityKey(session,paneId){return session+'\0'+paneId}
+function rememberLaunchIdentity(session,paneId,name){
+  if(!session||!paneId||!name)return;
+  LAUNCH_IDENTITY_OVERLAYS.set(launchIdentityKey(session,paneId),{
+    session,paneId,name,expiresAt:Date.now()+LAUNCH_IDENTITY_OVERLAY_TTL_MS,
+  });
+  const pane=(BOARD?.panes||[]).find(p=>p.session===session&&p.pane_id===paneId);
+  if(pane){pane.mail_name=name;renderBoard(BOARD)}
+}
+function applyLaunchIdentityOverlays(snapshot){
+  const now=Date.now();
+  for(const [key,item] of LAUNCH_IDENTITY_OVERLAYS){
+    const pane=(snapshot?.panes||[]).find(
+      p=>p.session===item.session&&p.pane_id===item.paneId
+    );
+    if(pane?.mail_name===item.name){LAUNCH_IDENTITY_OVERLAYS.delete(key);continue}
+    if(now>=item.expiresAt){LAUNCH_IDENTITY_OVERLAYS.delete(key);continue}
+    if(pane)pane.mail_name=item.name;
+  }
+  return snapshot;
+}
+const launchIdentityWait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function settleLaunchIdentity(session,paneId,repair){
+  if(!session||!paneId)return;
+  const delays=[0,500,1200,2500,4500];
+  for(let i=0;i<delays.length;i++){
+    if(delays[i])await launchIdentityWait(delays[i]);
+    if(repair&&(i===1||i===3)){
+      try{
+        await api(`/api/herdr/session/${encodeURIComponent(session)}/init-mail`,{method:'POST'});
+      }catch(e){}
+    }
+    try{
+      const identity=await api(`/api/herdr/pane/${encodeURIComponent(session)}/${encodeURIComponent(paneId)}/identity`);
+      if(identity.found&&identity.name){
+        rememberLaunchIdentity(session,paneId,identity.name);
+        await refreshBoard();
+        return;
+      }
+    }catch(e){}
+  }
+  if(repair)toast('Agent 已启动，但身份注册仍未完成；请在终端工具栏重试 init-mail',7000);
+  else toast('Agent Mail 已分配，但看板状态同步超时；请刷新看板',6000);
+}
 async function startAgent(){
   const session=document.getElementById('lnSession').value;
   const agent=document.getElementById('lnAgent').value;
@@ -2848,9 +2895,14 @@ async function startAgent(){
     const r=await api('/api/herdr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,workdir,agent,name,layout,workspace,args})});
     if(r.error)toast('启动: '+r.error);else{
       const mail=r.agent_mail||{};
+      if(mail.registered&&mail.name)rememberLaunchIdentity(session,r.pane_id,mail.name);
       const mailStatus=mail.notified?(' · 身份 '+mail.name+' 已通知'):(mail.warning?(' · Agent Mail: '+mail.warning):'');
-      toast((r.reused?'已复用 ':'已启动 ')+name+' ['+agent+'] @ '+session+(r.workspace?.strategy==='isolated'?' · 独立 worktree':'')+mailStatus,mail.warning?5000:2000);
+      const repairIdentity=!r.reused&&!mail.registered;
+      const partial=!r.reused&&(r.partial||!mail.registered);
+      const partialStatus=partial?' · 身份注册未完成，正在自动重试':'';
+      toast((r.reused?'已复用 ':'已启动 ')+name+' ['+agent+'] @ '+session+(r.workspace?.strategy==='isolated'?' · 独立 worktree':'')+mailStatus+partialStatus,partial||mail.warning?7000:2000);
       closeLaunchModal();
+      void settleLaunchIdentity(session,r.pane_id,repairIdentity);
       setTimeout(async()=>{await refreshBoard();launchRefreshName(true)},1500)
     }
   }catch(e){toast('启动失败: '+e)}

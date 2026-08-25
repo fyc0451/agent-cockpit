@@ -1563,7 +1563,7 @@ def test_start_agent_registers_and_notifies_unique_qoder_identity(
     assert response.json()["coordination"]["joined"] is True
 
 
-def test_start_agent_keeps_launch_success_when_identity_registration_fails(
+def test_start_agent_marks_launch_partial_when_identity_registration_fails(
     monkeypatch, tmp_path,
 ):
     workdir = tmp_path / "worktree"
@@ -1607,8 +1607,15 @@ def test_start_agent_keeps_launch_success_when_identity_registration_fails(
     body = response.json()
     assert "error" not in body
     assert body["pane_id"] == "w1:pA"
+    assert body["partial"] is True
+    assert body["error_code"] == "agent_mail_registration_incomplete"
+    assert body["needs_identity_repair"] is True
     assert body["agent_mail"]["registered"] is False
     assert "hub down" in body["agent_mail"]["warning"]
+    assert body["coordination"] == {
+        "joined": False, "reused": False,
+        "reason": "Agent Mail 身份未完成，暂不加入协作 run",
+    }
 
 
 def test_start_agent_binds_duplicate_same_type_to_exact_instance(monkeypatch, tmp_path):

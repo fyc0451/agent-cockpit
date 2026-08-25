@@ -9859,19 +9859,32 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
         result["agent_mail"] = _started_agent_mail_identity(
             req.session, result["pane_id"], req.agent, instance_id,
         )
-        try:
-            result["coordination"] = coordination.add_participant(
-                session=req.session,
-                participant_id=instance_id,
-                agent=req.agent,
-                pane_id=result["pane_id"],
-                workdir=workspace["workdir"],
-                mail_name=result["agent_mail"].get("name"),
-            )
-        except Exception as exc:
+        if not result["agent_mail"].get("registered"):
+            # pane 已经真实启动，且 Hub 侧可能与本地注册工具并发完成了注册；
+            # 此时强行关闭会制造无法精确退休的孤儿身份。保留 pane，但绝不能
+            # 继续伪装成完整成功：前端据此走精确 init-mail 修复并明确告警。
+            result["partial"] = True
+            result["error_code"] = "agent_mail_registration_incomplete"
+            result["needs_identity_repair"] = True
+        if result["agent_mail"].get("registered"):
+            try:
+                result["coordination"] = coordination.add_participant(
+                    session=req.session,
+                    participant_id=instance_id,
+                    agent=req.agent,
+                    pane_id=result["pane_id"],
+                    workdir=workspace["workdir"],
+                    mail_name=result["agent_mail"].get("name"),
+                )
+            except Exception as exc:
+                result["coordination"] = {
+                    "joined": False, "reused": False,
+                    "reason": f"新增 Agent 未同步到协作 run: {exc}",
+                }
+        else:
             result["coordination"] = {
                 "joined": False, "reused": False,
-                "reason": f"新增 Agent 未同步到协作 run: {exc}",
+                "reason": "Agent Mail 身份未完成，暂不加入协作 run",
             }
     return result
 

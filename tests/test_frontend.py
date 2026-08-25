@@ -607,6 +607,10 @@ def test_agent_launch_args_are_available_only_in_on_demand_forms():
     assert "finally" in launch and "button.disabled=false" in launch
     assert "QoderCLI 首次启动可能约 60 秒" in js
     assert "const mail=r.agent_mail||{}" in launch
+    assert "rememberLaunchIdentity(session,r.pane_id,mail.name)" in launch
+    assert "const repairIdentity=!r.reused&&!mail.registered" in launch
+    assert "settleLaunchIdentity(session,r.pane_id,repairIdentity)" in launch
+    assert "身份注册未完成，正在自动重试" in launch
     assert "const mailError=agentMailRequirementError()" in launch
     assert "mail.warning" in launch
     assert "身份 '+mail.name+' 已通知" in launch
@@ -614,6 +618,22 @@ def test_agent_launch_args_are_available_only_in_on_demand_forms():
     error, success = response.split(";else{", 1)
     assert "closeLaunchModal();" not in error
     assert "closeLaunchModal();" in success
+
+
+def test_launch_identity_overlay_survives_stale_board_refresh():
+    js = _inline_js()
+    refresh = js.split("async function refreshBoard(){", 1)[1].split(
+        "function classify", 1,
+    )[0]
+    settle = js.split("function rememberLaunchIdentity", 1)[1].split(
+        "async function startAgent", 1,
+    )[0]
+
+    assert "applyLaunchIdentityOverlays(d)" in refresh
+    assert "renderBoard(BOARD)" in settle
+    assert "/identity`" in settle
+    assert "/init-mail`" in settle
+    assert "LAUNCH_IDENTITY_OVERLAYS.delete" in settle
 
 
 def test_add_agent_form_opens_from_terminal_toolbar_instead_of_board_footer():
