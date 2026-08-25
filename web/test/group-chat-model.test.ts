@@ -28,6 +28,7 @@ import {
   unreadCountLabel,
   diffSummaryLines,
   groupByLedger,
+  withoutManagedTeamSessions,
   leftoverMemberName,
   focusedMemberRecipient,
   loadComposerDraft,
@@ -552,6 +553,21 @@ describe('reflow and fold long waterfall text', () => {
     expect(fromTui.some((block) => block.type === 'list')).toBe(true)
     expect(layoutMessageBlocks('注册:花名=codex-luna-agent-cockpit,项\n作。').some((block) => block.type === 'heading')).toBe(false)
     expect(layoutMessageBlocks('撤回').some((block) => block.type === 'heading')).toBe(false)
+  })
+})
+
+describe('Team 专用运行时隔离', () => {
+  it('只从普通会话列表隐藏明确标记的 Team runtime，旧绑定仍保留', () => {
+    const rows = [
+      { name: 'daily', status: 'idle', memberCount: 1, root: '/repo' },
+      { name: 'team-ready-1', status: 'working', memberCount: 1, root: '/repo' },
+      { name: 'legacy-bound', status: 'idle', memberCount: 1, root: '/repo' },
+    ]
+
+    expect(withoutManagedTeamSessions(rows, [
+      { session: 'team-ready-1', managedRuntime: true },
+      { session: 'legacy-bound', managedRuntime: false },
+    ]).map((row) => row.name)).toEqual(['daily', 'legacy-bound'])
   })
 })
 

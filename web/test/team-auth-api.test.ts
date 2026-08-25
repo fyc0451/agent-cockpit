@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   approveTeamUser,
   approveTeamReplyRequest,
+  createTeamSession,
   createTeamInvitation,
   listTeamMembers,
   listTeamReplyRequests,
@@ -203,6 +204,8 @@ describe('团队普通成员 API', () => {
             ready: false,
             reason: 'Session 已停止',
             reply_mode: 'auto',
+            managed_runtime: true,
+            lead: { agent: 'codex', mail_name: 'GoldRiver', status: 'working' },
           },
         ],
       }),
@@ -232,8 +235,39 @@ describe('团队普通成员 API', () => {
           reason: 'Session 已停止',
           projectRef: null,
           replyMode: 'auto',
+          managedRuntime: true,
+          lead: { agent: 'codex', mailName: 'GoldRiver', status: 'working' },
         },
       ],
+    })
+  })
+
+  it('一键创建 Team Session 发送工作区、Lead 与回复模式', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: async () => ({ session: 'team-ready-1' }),
+    } as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(createTeamSession('ready', {
+      workspaceId: 'workspace-1',
+      agent: 'codex',
+      model: 'gpt-5',
+      replyMode: 'confirm',
+    })).resolves.toEqual({ session: 'team-ready-1' })
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/team-auth/session-bindings/ready/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workspace_id: 'workspace-1',
+        agent: 'codex',
+        model: 'gpt-5',
+        reply_mode: 'confirm',
+        replace: false,
+      }),
+      credentials: 'include',
     })
   })
 

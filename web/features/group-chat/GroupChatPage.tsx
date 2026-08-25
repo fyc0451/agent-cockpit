@@ -35,20 +35,20 @@ import {
 } from '../../api/chatSession'
 import { fetchTeamConfig } from '../../api/teamConfig'
 import {
+  createTeamSession,
   teamAuthStatus,
   teamChangePassword,
   teamLogin,
   teamRegister,
   teamLogout,
   teamSessionBindings,
-  teamBindSession,
   listTeamProjects,
   listTeamMembers,
   requestTeamJoin,
   sendTeamPresence,
 } from '../../api/teamAuth'
 import { TeamTimeline } from '../team/TeamTimeline'
-import type { TeamBinding, TeamMember, TeamSessionCandidate, TeamTopic } from '../team/model'
+import type { TeamBinding, TeamMember, TeamTopic } from '../team/model'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { useLegacySettings } from '../../api/localSlice'
@@ -88,6 +88,7 @@ import {
   membersOfSession,
   parseMentionTargets,
   typingEntries,
+  withoutManagedTeamSessions,
   recallNotice,
   rootBase,
   saveActiveSession,
@@ -160,7 +161,6 @@ function NarrowAwareBrowser(props: {
   teamIsAdmin?: boolean
   teamTopics?: TeamTopic[]
   teamBindings?: TeamBinding[]
-  teamSessions?: TeamSessionCandidate[]
   teamActiveTopic?: string | null
   onTeamLogin?: (username: string, password: string) => Promise<void>
   onTeamRegister?: (input: {
@@ -172,7 +172,6 @@ function NarrowAwareBrowser(props: {
   onTeamLogout?: () => Promise<void>
   onTeamChangePassword?: (newPassword: string) => Promise<void>
   onTeamJoin?: (projectSlug: string, mentionHandle: string) => Promise<void>
-  onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
   onTeamSelectTopic?: (projectSlug: string) => void
   onOpenTeamAdmin?: () => void
 }) {
@@ -393,21 +392,29 @@ export function GroupChatPage() {
     await queryClient.invalidateQueries({ queryKey: ['team-projects'] })
   }, [queryClient])
 
-  const handleTeamBindSession = useCallback(async (projectSlug: string, sessionName: string) => {
+  const handleTeamCreateSession = useCallback(async (projectSlug: string, input: {
+    workspaceId: string
+    agent: 'codex' | 'claude' | 'kimi' | 'grok'
+    model?: string
+    replyMode: 'confirm' | 'auto'
+    replace?: boolean
+  }) => {
     try {
-      await teamBindSession(projectSlug, sessionName, false)
+      await createTeamSession(projectSlug, input)
     } catch (err) {
       if (err instanceof ApiError && err.code === 'conflict') {
-        if (window.confirm('该 Session 或话题已有绑定。改绑会踢掉前一台，继续？')) {
-          await teamBindSession(projectSlug, sessionName, true)
-        } else {
-          return
-        }
+        if (!window.confirm('该话题已有绑定。创建新的 Team Session 并替换当前绑定？')) return
+        await createTeamSession(projectSlug, { ...input, replace: true })
       } else {
         throw err
       }
     }
-    queryClient.invalidateQueries({ queryKey: ['team-bindings'] })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['team-bindings'] }),
+      queryClient.invalidateQueries({ queryKey: ['gc-sessions'] }),
+      queryClient.invalidateQueries({ queryKey: ['gc-snapshot'] }),
+      queryClient.invalidateQueries({ queryKey: ['gc-chat-ledger'] }),
+    ])
   }, [queryClient])
 
   const handleTeamSelectTopic = useCallback((projectSlug: string) => {
@@ -422,15 +429,50 @@ export function GroupChatPage() {
     [sessionsQ.data, snapshotQ.data],
   )
 
+  const visibleLiveRows = useMemo(
+    () => withoutManagedTeamSessions(liveRows, teamBindingsQ.data?.bindings ?? []),
+    [liveRows, teamBindingsQ.data?.bindings],
+  )
+
   // 工作区 = 账本登记；会话按 thread.herdr_session 挂到工作区下
   const { groups: workspaceGroups, ungrouped } = useMemo(
-    () => groupByLedger(liveRows, ledgerWorkspaces, ledgerThreads),
-    [liveRows, ledgerWorkspaces, ledgerThreads],
+    () => groupByLedger(visibleLiveRows, ledgerWorkspaces, ledgerThreads),
+    [visibleLiveRows, ledgerWorkspaces, ledgerThreads],
   )
   const rows = useMemo(
     () => [...workspaceGroups.flatMap((g) => g.rows), ...ungrouped],
     [workspaceGroups, ungrouped],
   )
+
+  const activeTeamBinding = useMemo(
+    () => teamBindingsQ.data?.bindings.find(
+      (binding) => binding.project_slug === teamActiveTopic,
+    ) ?? null,
+    [teamActiveTopic, teamBindingsQ.data?.bindings],
+  )
+  const currentTeamMentionHandle = useMemo(
+    () => teamTopics.find((topic) => topic.slug === teamActiveTopic)?.membership
+      ?.mention_handle ?? null,
+    [teamActiveTopic, teamTopics],
+  )
+  const teamMembersWithAgents = useMemo(() => (
+    (teamMembersQ.data ?? []).map((member) => {
+      if (
+        !currentTeamMentionHandle
+        || member.mention_handle.toLowerCase() !== currentTeamMentionHandle.toLowerCase()
+        || !activeTeamBinding
+      ) return member
+      return {
+        ...member,
+        agent: {
+          name: activeTeamBinding.lead?.mailName ?? activeTeamBinding.session,
+          kind: activeTeamBinding.lead?.agent ?? null,
+          status: activeTeamBinding.lead?.status ?? null,
+          managed: activeTeamBinding.managedRuntime === true,
+        },
+      }
+    })
+  ), [activeTeamBinding, currentTeamMentionHandle, teamMembersQ.data])
 
   // ---------- 当前会话 ----------
   const [activeSession, setActiveSession] = useState<string | null>(
@@ -1179,14 +1221,12 @@ export function GroupChatPage() {
                 teamIsAdmin={(teamAuthQ.data?.roles ?? []).includes('admin')}
                 teamTopics={teamTopics}
                 teamBindings={teamBindingsQ.data?.bindings ?? []}
-                teamSessions={teamBindingsQ.data?.sessions ?? []}
                 teamActiveTopic={teamActiveTopic}
                 onTeamLogin={handleTeamLogin}
                 onTeamRegister={handleTeamRegister}
                 onTeamLogout={handleTeamLogout}
                 onTeamChangePassword={handleTeamChangePassword}
                 onTeamJoin={handleTeamJoin}
-                onTeamBindSession={handleTeamBindSession}
                 onTeamSelectTopic={handleTeamSelectTopic}
                 onOpenTeamAdmin={() => navigate(routes.team())}
               />
@@ -1209,7 +1249,7 @@ export function GroupChatPage() {
             externalAddSignal={addMemberKey}
             availableAgentKinds={availableAgentKinds}
             teamTopic={teamActiveTopic}
-            teamMembers={teamMembersQ.data ?? []}
+            teamMembers={teamMembersWithAgents}
             teamMembersLoading={teamMembersQ.isPending && !!teamActiveTopic}
             teamMembersError={
               teamActiveTopic && teamMembersQ.isError
@@ -1218,10 +1258,14 @@ export function GroupChatPage() {
                   : '读取团队成员失败'
                 : null
             }
-            teamCurrentMentionHandle={
-              teamTopics.find((topic) => topic.slug === teamActiveTopic)?.membership
-                ?.mention_handle ?? null
-            }
+            teamCurrentMentionHandle={currentTeamMentionHandle}
+            teamBinding={activeTeamBinding}
+            teamWorkspaces={workspaceGroups.map((group) => ({
+              id: group.id,
+              label: group.label,
+            }))}
+            teamAvailableAgents={availableAgentKinds}
+            onTeamCreateSession={handleTeamCreateSession}
             onTeamMention={handleTeamMention}
             fileRoot={fileRoot}
             onPreview={setPreviewFile}
@@ -1271,16 +1315,12 @@ export function GroupChatPage() {
                 teamTopics.find((t) => t.slug === teamActiveTopic)?.name
                 ?? teamActiveTopic
               }
-              binding={
-                teamBindingsQ.data?.bindings.find(
-                  (binding) => binding.project_slug === teamActiveTopic,
-                ) ?? null
-              }
+              binding={activeTeamBinding}
               membership={
                 teamTopics.find((topic) => topic.slug === teamActiveTopic)?.membership
                 ?? null
               }
-              members={teamMembersQ.data ?? []}
+              members={teamMembersWithAgents}
               mentionRequest={teamMentionRequest}
             />
           ) : previewFile && activeSession ? (

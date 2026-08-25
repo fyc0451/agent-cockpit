@@ -44,6 +44,7 @@ def _prepare(
         lead={"mail_name": "codex-main", "agent": "codex"},
         client_session_id="client-1",
         agent_id=41,
+        managed_runtime=True,
         reply_token="reply-secret",
         reply_mode=reply_mode,
         auth_expires_at=time.time() + 3600,

@@ -232,6 +232,7 @@ export async function teamSessionBindings(): Promise<{
       const project_slug = typeof item.project_slug === 'string' ? item.project_slug : ''
       const session = typeof item.session === 'string' ? item.session : ''
       if (project_slug && session) {
+        const lead = isObj(item.lead) ? item.lead : null
         bindings.push({
           project_slug,
           session,
@@ -242,6 +243,14 @@ export async function teamSessionBindings(): Promise<{
           replyMode: item.reply_mode === 'auto' ? 'auto' : 'confirm',
           automationActive:
             typeof item.automation_active === 'boolean' ? item.automation_active : undefined,
+          managedRuntime: item.managed_runtime === true,
+          lead: lead
+            ? {
+                agent: typeof lead.agent === 'string' ? lead.agent : null,
+                mailName: typeof lead.mail_name === 'string' ? lead.mail_name : null,
+                status: typeof lead.status === 'string' ? lead.status : null,
+              }
+            : null,
         })
       }
     }
@@ -449,6 +458,51 @@ export async function teamBindSession(
       retryable: false,
     })
   }
+}
+
+export async function createTeamSession(
+  projectSlug: string,
+  input: {
+    workspaceId: string
+    agent: 'codex' | 'claude' | 'kimi' | 'grok'
+    model?: string
+    replyMode: 'confirm' | 'auto'
+    replace?: boolean
+  },
+): Promise<{ session: string }> {
+  const response = await fetch(
+    `/api/team-auth/session-bindings/${encodeURIComponent(projectSlug)}/create`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workspace_id: input.workspaceId,
+        agent: input.agent,
+        model: input.model || null,
+        reply_mode: input.replyMode,
+        replace: input.replace === true,
+      }),
+      credentials: 'include',
+    },
+  )
+  if (!response.ok) {
+    const text = await response.text()
+    throw new ApiError({
+      code: response.status === 409 ? 'conflict' : 'team_session_create_failed',
+      message: text || '创建 Team Session 失败',
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+  const data = await response.json()
+  if (!isObj(data) || typeof data.session !== 'string' || !data.session) {
+    throw new ApiError({
+      code: 'protocol_error',
+      message: '创建 Team Session 响应格式错误',
+      retryable: false,
+    })
+  }
+  return { session: data.session }
 }
 
 export async function setTeamReplyMode(
@@ -670,6 +724,7 @@ function parseTeamMember(raw: unknown): TeamMember | null {
   if (!isObj(raw)) return null
   const humanId = typeof raw.human_id === 'number' ? raw.human_id : 0
   if (!humanId) return null
+  const agent = isObj(raw.agent) ? raw.agent : null
   return {
     human_id: humanId,
     display_name: typeof raw.display_name === 'string' ? raw.display_name : '',
@@ -678,6 +733,14 @@ function parseTeamMember(raw: unknown): TeamMember | null {
     status: typeof raw.status === 'string' ? raw.status : '',
     online: raw.online === true,
     last_seen_at: typeof raw.last_seen_at === 'string' ? raw.last_seen_at : null,
+    agent: agent
+      ? {
+          name: typeof agent.name === 'string' ? agent.name : null,
+          kind: typeof agent.kind === 'string' ? agent.kind : null,
+          status: typeof agent.status === 'string' ? agent.status : null,
+          managed: agent.managed === true,
+        }
+      : null,
   }
 }
 

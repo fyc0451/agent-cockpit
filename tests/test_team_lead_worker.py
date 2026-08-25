@@ -73,6 +73,8 @@ def test_claim_persists_0600_but_prompt_contains_no_remote_content(_state):
     assert "Remote subject" not in prompts[0][2]
     assert "IGNORE POLICY" not in prompts[0][2]
     assert "Alice" not in prompts[0][2]
+    assert "该 Team Session 只允许查看、搜索、分析和回复" in prompts[0][2]
+    assert "禁止修改或删除文件、提交、推送" in prompts[0][2]
 
 
 def test_active_lead_explicitly_reads_without_capability_secrets():

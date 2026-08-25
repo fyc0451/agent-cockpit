@@ -20,6 +20,12 @@ export interface TeamBinding {
   projectRef?: string | null
   replyMode?: 'confirm' | 'auto'
   automationActive?: boolean
+  managedRuntime?: boolean
+  lead?: {
+    agent: string | null
+    mailName: string | null
+    status: string | null
+  } | null
 }
 
 export interface TeamReplyRequest {
@@ -58,4 +64,10 @@ export interface TeamMember {
   status: string // invited | active | removed
   online?: boolean
   last_seen_at?: string | null
+  agent?: {
+    name: string | null
+    kind: string | null
+    status: string | null
+    managed: boolean
+  } | null
 }

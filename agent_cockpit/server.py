@@ -1107,6 +1107,7 @@ TASK_REPORT_SCRIPT = AGENT_MAIL_TOOLS_DIR / "task-report"
 _SETUP_WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
 _SETUP_WORKSPACE_LOCKS_GUARD = threading.Lock()
 _TEAM_SESSION_BIND_LOCK = threading.Lock()
+_TEAM_SESSION_CREATE_LOCK = threading.Lock()
 ZOOM_LEASE_TTL = 30.0
 ZOOM_LEASE_RETRY = 5.0
 _ZOOM_LEASES: dict[str, dict[str, Any]] = {}
@@ -2419,6 +2420,15 @@ class AgentMailConfigReq(BaseModel):
 
 class TeamSessionBindReq(BaseModel):
     session: str = Field(..., min_length=1, max_length=64)
+    replace: bool = False
+    reply_mode: str | None = Field(default=None, pattern=r"^(confirm|auto)$")
+
+
+class TeamSessionCreateReq(BaseModel):
+    workspace_id: str = Field(..., min_length=1, max_length=128)
+    agent: str = Field(default="codex", min_length=1, max_length=32)
+    model: str | None = Field(default=None, max_length=128)
+    reply_mode: str = Field(default="confirm", pattern=r"^(confirm|auto)$")
     replace: bool = False
 
 
@@ -4454,8 +4464,11 @@ def _public_team_session_binding(
         isinstance(row.get("reply_token"), str) and row.get("reply_token")
     )
     auth_active = team_sessions.binding_auth_active(row)
+    managed_runtime = row.get("managed_runtime") is True
     reason = None
-    if candidate is not None and lead_identity_visible and not lead_identity_matches:
+    if not managed_runtime:
+        reason = "旧绑定使用普通本地会话，需要迁移为 Topic 专用 Agent"
+    elif candidate is not None and lead_identity_visible and not lead_identity_matches:
         reason = "Session 负责人身份已变化，需要重新绑定"
     elif candidate is not None and not candidate.get("ready"):
         reason = candidate.get("reason")
@@ -4473,11 +4486,12 @@ def _public_team_session_binding(
         "lead": {
             "agent": lead.get("agent"),
             "mail_name": lead.get("mail_name"),
+            "status": current_lead.get("status"),
         },
         "agent_id": row.get("agent_id"),
         "active": active,
         "ready": bool(
-            active and candidate and candidate.get("ready")
+            managed_runtime and active and candidate and candidate.get("ready")
             and lead_identity_matches and has_reply_capability
             and auth_active
         ),
@@ -4487,7 +4501,10 @@ def _public_team_session_binding(
             if row.get("reply_mode") in {"confirm", "auto"}
             else "confirm"
         ),
-        "automation_active": bool(auth_active and has_reply_capability),
+        "automation_active": bool(
+            managed_runtime and auth_active and has_reply_capability
+        ),
+        "managed_runtime": managed_runtime,
         "project_ref": _team_project_ref(row.get("mail_project")),
         "updated_ts": row.get("updated_ts"),
     }
@@ -4574,6 +4591,10 @@ def api_team_session_bind(
             raise HTTPException(
                 409, str(candidate.get("reason") or "Session 负责人不可用")
             )
+        lead = candidate.get("lead") if isinstance(candidate.get("lead"), dict) else {}
+        lead_agent = str(lead.get("agent") or "").lower()
+        if lead_agent not in TEAM_READ_ONLY_AGENTS:
+            raise HTTPException(409, f"{lead_agent or '该 Agent'} 暂不支持 Team Session 只读模式")
         bindings = _team_session_bindings_for(hub, int(human["id"]))
         current = next((
             row for row in bindings
@@ -4581,6 +4602,9 @@ def api_team_session_bind(
             and row.get("session") == req.session
             and row.get("session_generation") == str(candidate["generation"])
         ), None)
+        creating_managed_runtime = bool(
+            getattr(request.state, "team_managed_runtime", False)
+        )
         identity_changed = bool(
             current is not None
             and not _team_binding_lead_matches_candidate(current, candidate)
@@ -4622,6 +4646,10 @@ def api_team_session_bind(
                     "rotate_reply_token": identity_changed or not bool(
                         isinstance((current or {}).get("reply_token"), str)
                         and (current or {}).get("reply_token")
+                    ),
+                    **(
+                        {"reply_mode": req.reply_mode}
+                        if req.reply_mode is not None else {}
                     ),
                 },
             )
@@ -4671,9 +4699,14 @@ def api_team_session_bind(
                 reply_token=reply_token,
                 reply_mode=_team_remote_reply_mode(
                     remote,
-                    str((current or {}).get("reply_mode") or "confirm"),
+                    req.reply_mode
+                    or str((current or {}).get("reply_mode") or "confirm"),
                 ),
                 auth_expires_at=_team_auth_expires_at(request),
+                managed_runtime=bool(
+                    creating_managed_runtime
+                    or (current or {}).get("managed_runtime") is True
+                ),
                 replace=req.replace,
             )
         except (ValueError, OSError) as exc:
@@ -4690,6 +4723,98 @@ def api_team_session_bind(
     return {
         "ok": True,
         "binding": _public_team_session_binding(binding, [candidate]),
+    }
+
+
+@app.post("/api/team-auth/session-bindings/{project_slug}/create")
+def api_team_session_create_and_bind(
+    project_slug: str, req: TeamSessionCreateReq, request: Request,
+):
+    """以只读参数创建独立 Team Session，并在同一次操作中绑定 Topic。"""
+    slug = _team_project_slug(project_slug)
+    authorization, _ = _team_human_context(request)
+    try:
+        membership = hub_client.human_api(
+            "GET",
+            f"/hub/api/projects/{quote(slug, safe='')}/membership",
+            authorization,
+        )
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    if not isinstance(membership, dict) or membership.get("status") != "active":
+        raise HTTPException(403, "只有项目 active 成员可以创建 Team Session")
+    workspace = _chat_workspace(req.workspace_id)
+    agent = req.agent.strip().lower()
+    try:
+        safe_args = _apply_read_only_args(agent, "")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session_name: str | None = None
+    try:
+        with _TEAM_SESSION_CREATE_LOCK:
+            session_name = _next_team_session_name(slug)
+            created = _create_chat_session(
+                req.workspace_id,
+                ChatSessionCreateReq(
+                    agent=agent,
+                    title=f"Team {slug}",
+                    model=req.model,
+                    args=safe_args,
+                ),
+                session_name=session_name,
+            )
+    except HTTPException as exc:
+        rollback = (
+            _rollback_created_team_session(session_name)
+            if session_name else {"skipped": True}
+        )
+        raise HTTPException(exc.status_code, {
+            "detail": exc.detail,
+            "stage": "create_session",
+            "rollback": rollback,
+        }) from exc
+    assert session_name is not None
+    agent_mail = (
+        created.get("agent_mail")
+        if isinstance(created.get("agent_mail"), dict) else {}
+    )
+    if agent_mail.get("ok") is not True or not created.get("leader"):
+        rollback = _rollback_created_team_session(session_name)
+        detail = str(agent_mail.get("reason") or "Team Lead 身份注册失败")
+        raise HTTPException(502, {
+            "detail": detail,
+            "stage": "register_lead",
+            "rollback": rollback,
+        })
+    request.state.team_managed_runtime = True
+    try:
+        bound = api_team_session_bind(
+            slug,
+            TeamSessionBindReq(
+                session=session_name,
+                replace=req.replace,
+                reply_mode=req.reply_mode,
+            ),
+            request,
+        )
+    except HTTPException as exc:
+        rollback = _rollback_created_team_session(session_name)
+        raise HTTPException(exc.status_code, {
+            "detail": exc.detail,
+            "stage": "bind_topic",
+            "rollback": rollback,
+        }) from exc
+    finally:
+        request.state.team_managed_runtime = False
+    return {
+        "ok": True,
+        "session": session_name,
+        "thread": created["thread"],
+        "binding": bound["binding"],
+        "workspace": {
+            "id": workspace["id"],
+            "title": workspace["title"],
+        },
     }
 
 
@@ -5752,7 +5877,8 @@ _OVERSEER_PREAMBLE_RE = re.compile(
 _BOSS_HINT_RE = re.compile(
     r"^[ \t❯]*Boss 在群聊给你发了消息[^\n]*"
     r"(?:\n+[ \t]*(?:请直接做|请用 mail-recv|结论写在终端|本群 Leader 是|"
-    r"给 Leader 写信|需要写信时|不要写 grok-main|最终答复必须|不要只汇报|若 Boss 要求)[^\n]*)*",
+    r"给 Leader 写信|需要写信时|不要写 grok-main|最终答复必须|不要只汇报|若 Boss 要求|"
+    r"这是受控 Team Session)[^\n]*)*",
     re.MULTILINE,
 )
 _META_COMMENT_RE = re.compile(r"<!--\s*agent-cockpit-meta:[\s\S]*?-->\s*")
@@ -7362,6 +7488,94 @@ def _pane_queue_ready(pane: dict[str, Any]) -> bool:
     return (now - since) >= _QUEUE_IDLE_SETTLE_S
 
 
+def _team_session_read_only(session: str) -> bool:
+    """只有当前代际已绑定 Team Topic 的专用 Session 才启用只读栅栏。"""
+    try:
+        candidate = next((
+            item for item in _team_session_candidates()
+            if item.get("session") == session
+        ), None)
+    except Exception:
+        logger.exception("Team Session 栅栏状态读取失败: %s", session)
+        return False
+    if candidate is None:
+        return False
+    generation = str(candidate.get("generation") or "")
+    try:
+        return bool(
+            generation and team_sessions.is_managed_session(session, generation)
+        )
+    except OSError:
+        logger.exception("Team Session 绑定状态不可用: %s", session)
+        return False
+
+
+TEAM_READ_ONLY_AGENTS = {"codex", "claude", "kimi", "grok"}
+
+
+def _without_cli_options(
+    tokens: list[str], *, valued: set[str], flags: set[str],
+) -> list[str]:
+    kept: list[str] = []
+    skip_value = False
+    for token in tokens:
+        if skip_value:
+            skip_value = False
+            continue
+        if token in valued:
+            skip_value = True
+            continue
+        if any(token.startswith(f"{name}=") for name in valued):
+            continue
+        if token in flags:
+            continue
+        kept.append(token)
+    return kept
+
+
+def _apply_read_only_args(agent: str, args: str) -> str:
+    """为 Team 专用 Session 强制 provider 可验证的只读/计划模式。"""
+    if agent not in TEAM_READ_ONLY_AGENTS:
+        raise ValueError(f"{agent} 暂不支持 Team Session 只读模式")
+    tokens = shlex.split(args)
+    if agent == "codex":
+        kept = _without_cli_options(
+            tokens,
+            valued={"--sandbox"},
+            flags={
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--dangerously-bypass-hook-trust",
+            },
+        )
+        kept.extend(["--sandbox", "read-only"])
+        return shlex.join(kept)
+    if agent == "kimi":
+        kept = _without_cli_options(
+            tokens,
+            valued=set(),
+            flags={"-y", "--yolo", "--auto", "--yes", "--plan"},
+        )
+        return shlex.join([*kept, "--plan"])
+    kept = _without_cli_options(
+        tokens,
+        valued={"--permission-mode"},
+        flags={
+            "--dangerously-skip-permissions",
+            "--allow-dangerously-skip-permissions",
+            "--no-plan",
+        },
+    )
+    return shlex.join([*kept, "--permission-mode", "plan"])
+
+
+_CHAT_FENCE_LINE = (
+    "这是受控 Team Session：对这条消息只允许执行读取类操作"
+    "（查看、搜索、分析、git status/diff/log）；禁止写入、修改、删除文件，"
+    "禁止 commit、push、checkout 等改变仓库或系统状态的操作。"
+    "若任务要求写操作，请说明需要交给普通本地会话另行授权执行。\n\n"
+)
+
+
 def _chat_notify_hint(session: str, text: str, delivery: str) -> str:
     leader = _ensure_session_leader(session)
     leader_name = leader.get("leader_mail_name") or ""
@@ -7380,12 +7594,13 @@ def _chat_notify_hint(session: str, text: str, delivery: str) -> str:
         opener = (
             "Boss 在群聊给你发了消息。请直接做下面的任务，结论写在终端，群聊会收进瀑布流。\n"
         )
+    fence_line = _CHAT_FENCE_LINE if _team_session_read_only(session) else ""
     answer_rule = (
         "最终答复必须直接给出这条消息所需的完整答案；"
         "不要只汇报“已回复、已写入终端、未发送邮件”等投递状态。"
         "若 Boss 要求“在回复或群聊里写”，请直接重述所指的完整结果正文。\n\n"
     )
-    return opener + leader_line + answer_rule + text[:500]
+    return opener + fence_line + leader_line + answer_rule + text[:500]
 
 
 def _notify_chat_recipients(
@@ -8019,6 +8234,22 @@ def _next_herdr_session_name(workspace: dict[str, Any]) -> str:
     raise HTTPException(400, "无法分配 session 名")
 
 
+def _next_team_session_name(project_slug: str) -> str:
+    return _next_herdr_session_name({
+        "title": f"team-{project_slug}",
+        "path": project_slug,
+    })
+
+
+def _rollback_created_team_session(session: str) -> dict[str, Any]:
+    """一键创建失败时只回收本事务刚创建的 Session。"""
+    stopped = api_herdr_session_stop(session)
+    deleted: dict[str, Any] | None = None
+    if stopped.get("stopped") or stopped.get("already_stopped"):
+        deleted = api_herdr_session_delete(session)
+    return {"stopped": stopped, "deleted": deleted}
+
+
 def _restore_session_members(session: str, workdir: str) -> list[dict[str, Any]]:
     """stopped 拉起后按 launch descriptor 逐个补成员。Codex 走 resume --last。"""
     snap = _herdr_runtime_snapshot()
@@ -8076,15 +8307,20 @@ def _restore_session_members(session: str, workdir: str) -> list[dict[str, Any]]
     return out
 
 
-@app.post("/api/chat/workspaces/{workspace_id}/sessions")
-def api_chat_session_create(workspace_id: str, req: ChatSessionCreateReq):
-    """群聊新会话：拉起 herdr + Leader，不走沉重的 setup-workspace 简报/协调。"""
+def _create_chat_session(
+    workspace_id: str,
+    req: ChatSessionCreateReq,
+    *,
+    session_name: str | None = None,
+) -> dict[str, Any]:
+    """拉起 herdr + Leader；Team 入口可先指定安全会话名和启动参数。"""
     workspace = _chat_workspace(workspace_id)
     agent = (req.agent or "codex").strip().lower()
     if agent not in {"codex", "claude", "kimi", "opencode", "grok", "qodercli"}:
         raise HTTPException(400, "不支持的 Leader Agent")
-    session_name = _next_herdr_session_name(workspace)
-    boot = herdr_client.start_session(session_name, workdir=workspace["path"])
+    name = session_name or _next_herdr_session_name(workspace)
+    _validate_session_name(name)
+    boot = herdr_client.start_session(name, workdir=workspace["path"])
     if boot.get("available") is False or boot.get("error"):
         raise HTTPException(503, str(boot.get("error") or "无法启动 herdr session"))
     try:
@@ -8093,7 +8329,7 @@ def api_chat_session_create(workspace_id: str, req: ChatSessionCreateReq):
         raise HTTPException(400, str(exc)) from exc
     instance_id = herdr_client.new_agent_instance_id()
     started = herdr_client.start_agent(
-        session_name, workspace["path"], agent,
+        name, workspace["path"], agent,
         model=req.model, layout="tab", label=agent, args=session_args,
         instance_id=instance_id,
     )
@@ -8104,21 +8340,27 @@ def api_chat_session_create(workspace_id: str, req: ChatSessionCreateReq):
         )
     try:
         thread = chat_ledger.create_thread(
-            workspace_id, session_name, req.title or session_name,
+            workspace_id, name, req.title or name,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     pane_id = str(started.get("pane_id") or "")
     agent_mail, leader = _register_created_chat_leader(
-        workspace, session_name, pane_id, agent, instance_id,
+        workspace, name, pane_id, agent, instance_id,
     )
     return {
         "thread": thread,
-        "session": session_name,
+        "session": name,
         "started": started,
         "agent_mail": agent_mail,
         "leader": leader,
     }
+
+
+@app.post("/api/chat/workspaces/{workspace_id}/sessions")
+def api_chat_session_create(workspace_id: str, req: ChatSessionCreateReq):
+    """群聊新会话：拉起 herdr + Leader，不走沉重的 setup-workspace 简报/协调。"""
+    return _create_chat_session(workspace_id, req)
 
 
 @app.get("/api/files")
@@ -8880,7 +9122,10 @@ def _start_agent(req: StartAgentReq) -> dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
     instance_id = herdr_client.new_agent_instance_id()
     try:
-        normalized_args = herdr_client.normalize_agent_args(req.args)
+        fence_args = req.args
+        if _team_session_read_only(req.session):
+            fence_args = _apply_read_only_args(req.agent, fence_args)
+        normalized_args = herdr_client.normalize_agent_args(fence_args)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     project_dir = Path(req.workdir).expanduser().resolve()

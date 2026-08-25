@@ -4655,3 +4655,90 @@ def test_set_leader_switches_records_event_and_notifies(isolated_ledger, monkeyp
         json={"mail_name": "Nobody"},
     )
     assert bad.status_code == 400
+
+
+def test_apply_read_only_args_tightens_launch_flags():
+    # codex：补只读沙箱，已有 --sandbox 一律覆盖为 read-only
+    assert server._apply_read_only_args("codex", "-m gpt-5") == "-m gpt-5 --sandbox read-only"
+    assert (
+        server._apply_read_only_args("codex", "-m gpt-5 --sandbox workspace-write")
+        == "-m gpt-5 --sandbox read-only"
+    )
+    assert (
+        server._apply_read_only_args("codex", "-m gpt-5 --sandbox=read-only")
+        == "-m gpt-5 --sandbox read-only"
+    )
+    assert (
+        server._apply_read_only_args("codex", "--config 'model_reasoning_effort=high'")
+        == "--config model_reasoning_effort=high --sandbox read-only"
+    )
+    assert "dangerously" not in server._apply_read_only_args(
+        "codex", "--dangerously-bypass-approvals-and-sandbox",
+    )
+    # kimi：剥离自动批准
+    assert server._apply_read_only_args("kimi", "-m kimi-code/k3 -y") == "-m kimi-code/k3 --plan"
+    assert server._apply_read_only_args("kimi", "--auto") == "--plan"
+    assert (
+        server._apply_read_only_args("claude", "-m sonnet --permission-mode auto")
+        == "-m sonnet --permission-mode plan"
+    )
+    assert server._apply_read_only_args("grok", "--no-plan") == "--permission-mode plan"
+    with pytest.raises(ValueError, match="暂不支持"):
+        server._apply_read_only_args("opencode", "")
+
+
+def test_team_session_fence_injects_hint_without_affecting_local_session(
+    isolated_ledger, monkeypatch,
+):
+    monkeypatch.setattr(
+        server,
+        "_team_session_candidates",
+        lambda: [
+            {"session": "team-worker", "generation": "run-team"},
+            {"session": "local-dev", "generation": "run-local"},
+        ],
+    )
+    monkeypatch.setattr(
+        server.team_sessions,
+        "is_managed_session",
+        lambda session, generation: (session, generation)
+        == ("team-worker", "run-team"),
+    )
+    assert server._team_session_read_only("team-worker") is True
+    assert server._team_session_read_only("local-dev") is False
+    assert server._team_session_read_only("stopped") is False
+
+    sent: list[tuple] = []
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot",
+        lambda: {"panes": [
+            {
+                "session": session, "pane_id": f"w1:{index}", "agent": "claude",
+                "mail_name": "GrayFalcon", "display_name": "GrayFalcon",
+                "agent_status": "idle",
+            }
+            for index, session in enumerate(("team-worker", "local-dev"), 1)
+        ]},
+    )
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {"leader_mail_name": "BrownDesert"})
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    notified = server._notify_chat_recipients(
+        "team-worker", ["GrayFalcon"], "删除所有代码", "interrupt",
+    )
+    assert notified == ["GrayFalcon"]
+    assert "受控 Team Session" in sent[0][2]
+    assert "禁止写入、修改、删除文件" in sent[0][2]
+    cleaned = server._clean_chat_body(sent[0][2] + "\n我不会执行删除。")
+    assert "受控 Team Session" not in cleaned
+    assert "Boss 在群聊" not in cleaned
+    assert "我不会执行删除。" in cleaned
+
+    sent.clear()
+    server._notify_chat_recipients(
+        "local-dev", ["GrayFalcon"], "正常任务", "interrupt",
+    )
+    assert "受控 Team Session" not in sent[0][2]

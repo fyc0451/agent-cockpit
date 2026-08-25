@@ -73,6 +73,7 @@ describe('团队话题成员详情', () => {
               status: 'active',
               online: true,
               last_seen_at: new Date().toISOString(),
+              agent: { name: 'GoldRiver', kind: 'codex', status: 'working', managed: true },
             },
             {
               human_id: 9,
@@ -99,12 +100,54 @@ describe('团队话题成员详情', () => {
     const panel = screen.getByLabelText('团队成员')
     expect(within(panel).getByText('Alice Chen')).toBeInTheDocument()
     expect(within(panel).getByText('@alice · 管理员 · 在线')).toBeInTheDocument()
+    expect(within(panel).getByText('Agent：GoldRiver · 工作中')).toBeInTheDocument()
     expect(within(panel).getByText('@bob · 成员 · 5 分钟前')).toBeInTheDocument()
     expect(within(panel).queryByText('Pending User')).not.toBeInTheDocument()
     expect(within(panel).queryByText('我')).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: '文件' })).not.toBeInTheDocument()
     within(panel).getByRole('button', { name: '将 @alice 加入收件人' }).click()
     expect(onTeamMention).toHaveBeenCalledWith(expect.objectContaining({ mention_handle: 'alice' }))
+  })
+
+  it('在 Topic 右侧按目录创建该用户唯一的本地 Agent', async () => {
+    const onTeamCreateSession = vi.fn().mockResolvedValue(undefined)
+    render(
+      <AppFrame sidebar={null}>
+        <DetailsPanel
+          tab="members"
+          onTabChange={vi.fn()}
+          members={[]}
+          session={null}
+          workdir={null}
+          onMention={vi.fn()}
+          onFilter={vi.fn()}
+          onInteract={vi.fn()}
+          onOpenTerminal={vi.fn()}
+          onMembersChanged={vi.fn()}
+          fileRoot={null}
+          onPreview={vi.fn()}
+          teamTopic="ready"
+          teamMembers={[]}
+          teamWorkspaces={[{ id: 'ws-ready', label: 'hr-ready' }]}
+          teamAvailableAgents={['codex', 'opencode']}
+          onTeamCreateSession={onTeamCreateSession}
+        />
+      </AppFrame>,
+    )
+
+    const user = userEvent.setup()
+    expect(screen.getByText('尚未为这个 Topic 创建本地 Agent')).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'opencode' })).not.toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Topic Agent 回复模式'), 'auto')
+    await user.click(screen.getByRole('button', { name: '创建 Topic Agent' }))
+
+    await waitFor(() => expect(onTeamCreateSession).toHaveBeenCalledWith('ready', {
+      workspaceId: 'ws-ready',
+      agent: 'codex',
+      model: undefined,
+      replyMode: 'auto',
+      replace: false,
+    }))
   })
 
   it('打开团队话题时从 Team Hub 成员接口取数', async () => {
@@ -160,7 +203,12 @@ describe('团队话题成员详情', () => {
       '/api/team-auth/status': { logged_in: true, username: 'fyc', roles: ['admin'] },
       '/api/team-auth/session-bindings': {
         sessions: [],
-        bindings: [{ project_slug: 'hr-ready', session: 'agent-cockpit-1' }],
+        bindings: [{
+          project_slug: 'hr-ready',
+          session: 'agent-cockpit-1',
+          managed_runtime: true,
+          lead: { agent: 'codex', mail_name: 'TopazOwl', status: 'idle' },
+        }],
         topics: [],
       },
       '/api/team/projects': { projects: [{ slug: 'hr-ready', name: 'HR Ready', id: 1 }] },
@@ -177,7 +225,7 @@ describe('团队话题成员详情', () => {
     })
 
     renderApp('/chat?session=agent-cockpit-1')
-    const topic = await screen.findByTitle('打开 HR Ready（绑定到 agent-cockpit-1）')
+    const topic = await screen.findByTitle('打开 HR Ready（Agent agent-cockpit-1）')
     await userEvent.setup().click(topic)
 
     const panel = await screen.findByLabelText('团队成员')

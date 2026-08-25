@@ -24,6 +24,7 @@ def _bind(**overrides):
         },
         "client_session_id": "client-run-a",
         "agent_id": 11,
+        "managed_runtime": True,
         "auth_expires_at": time.time() + 3600,
     }
     values.update(overrides)
@@ -42,6 +43,32 @@ def test_bind_persists_minimal_private_state(tmp_path, monkeypatch):
     raw = state.read_text(encoding="utf-8")
     assert "registration_token" not in raw
     assert json.loads(raw)["bindings"][0]["lead"]["mail_name"] == "codex-main"
+
+
+def test_managed_session_matches_exact_bound_generation(tmp_path, monkeypatch):
+    monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
+    _bind()
+
+    assert team_sessions.is_managed_session("workspace-a", "run-a") is True
+    assert team_sessions.is_managed_session("workspace-a", "rebuilt") is False
+    assert team_sessions.is_managed_session("other", "run-a") is False
+
+    team_sessions.unbind_project("http://team.example", 7, "alpha")
+    assert team_sessions.is_managed_session("workspace-a", "run-a") is False
+
+
+def test_legacy_local_session_binding_is_not_managed_or_worker_eligible(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
+    saved = _bind(
+        managed_runtime=False,
+        reply_token="reply-secret",
+    )
+
+    assert saved["managed_runtime"] is False
+    assert team_sessions.is_managed_session("workspace-a", "run-a") is False
+    assert team_sessions.reply_bindings_for_lead("/work/a", "codex-main") == []
 
 
 def test_reply_token_is_private_and_preserved_on_idempotent_bind(
@@ -144,6 +171,29 @@ def test_project_cannot_change_session_without_replace(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="显式确认"):
         _bind(session="workspace-b", session_generation="run-b", session_dir="/work/b")
+
+
+def test_one_human_can_use_different_agents_for_different_topics(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
+    _bind()
+    _bind(
+        project_slug="beta",
+        session="workspace-b",
+        session_generation="run-b",
+        session_dir="/work/b",
+        mail_project="/work/b",
+        lead={"agent": "claude", "mail_name": "claude-beta"},
+        client_session_id="client-run-b",
+        agent_id=12,
+    )
+
+    rows = team_sessions.list_bindings("http://team.example", 7)
+    assert [(row["project_slug"], row["session_dir"]) for row in rows] == [
+        ("alpha", "/work/a"),
+        ("beta", "/work/b"),
+    ]
 
 
 def test_rebuilt_session_is_new_generation_and_prunes_stale_name(

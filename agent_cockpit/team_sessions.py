@@ -65,6 +65,22 @@ def list_bindings(hub: str, human_id: int) -> list[dict[str, Any]]:
     ]
 
 
+def is_managed_session(session: str, session_generation: str) -> bool:
+    """当前精确代际是否已被 Human 明确指定为 Team 专用 Session。"""
+    name = str(session).strip()
+    generation = str(session_generation).strip()
+    if not name or not generation:
+        return False
+    with _lock:
+        rows = _load()["bindings"]
+    return any(
+        row.get("session") == name
+        and row.get("session_generation") == generation
+        and row.get("managed_runtime") is True
+        for row in rows
+    )
+
+
 def conflicts_for(
     *,
     hub: str,
@@ -110,6 +126,7 @@ def bind(
     reply_token: str | None = None,
     reply_mode: str | None = None,
     auth_expires_at: float | None = None,
+    managed_runtime: bool = False,
     replace: bool = False,
 ) -> dict[str, Any]:
     """同一用户/Hub 下保持 Session↔TeamProject 一对一；改绑需显式确认。"""
@@ -147,6 +164,7 @@ def bind(
         },
         "client_session_id": client_id,
         "agent_id": int(agent_id),
+        "managed_runtime": bool(managed_runtime),
         "updated_ts": time.time(),
     }
     with _lock:
@@ -350,6 +368,7 @@ def reply_bindings_for_lead(
         and isinstance(row.get("reply_token"), str)
         and bool(row.get("reply_token"))
         and binding_auth_active(row)
+        and row.get("managed_runtime") is True
     ]
 
 

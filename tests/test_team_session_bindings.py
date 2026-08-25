@@ -1,3 +1,5 @@
+import time
+
 from fastapi.testclient import TestClient
 
 import server
@@ -294,6 +296,7 @@ def test_managed_restart_identity_change_degrades_binding_and_stops_worker(monke
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id=server._team_client_session_id("demo", "run-1"),
         agent_id=41,
+        managed_runtime=True,
         reply_token="old-secret",
     )
 
@@ -352,6 +355,7 @@ def test_managed_restart_rebind_requires_confirmation_and_rotates_capability(mon
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id=server._team_client_session_id("demo", "run-1"),
         agent_id=41,
+        managed_runtime=True,
         reply_token="old-secret",
     )
 
@@ -424,6 +428,7 @@ def test_legacy_binding_without_reply_capability_requires_resync(monkeypatch):
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id=server._team_client_session_id("demo", "run-1"),
         agent_id=41,
+        managed_runtime=True,
     )
 
     response = client.get("/api/team-auth/session-bindings", headers=headers)
@@ -454,7 +459,7 @@ def test_inbox_route_is_disabled_without_fetching_remote_items(monkeypatch):
     assert not hasattr(server, "_team_inbox_reply_command")
 
 
-def test_bind_creates_managed_lead_and_saves_local_mapping(monkeypatch):
+def test_binding_existing_local_session_is_legacy_and_requires_migration(monkeypatch):
     client, headers = _prepare(monkeypatch)
     calls = []
     monkeypatch.setattr(server.hub_client, "human_api", _human_api(calls=calls))
@@ -486,6 +491,12 @@ def test_bind_creates_managed_lead_and_saves_local_mapping(monkeypatch):
     assert saved[0]["reply_token"] == "reply-secret"
     assert saved[0]["reply_mode"] == "confirm"
     assert response.json()["binding"]["reply_mode"] == "confirm"
+    assert response.json()["binding"]["managed_runtime"] is False
+    assert response.json()["binding"]["ready"] is False
+    assert response.json()["binding"]["reason"] == (
+        "旧绑定使用普通本地会话，需要迁移为 Topic 专用 Agent"
+    )
+    assert saved[0]["managed_runtime"] is False
     assert "reply-secret" not in response.text
 
 
@@ -504,6 +515,7 @@ def test_reply_mode_switch_rotates_capability_and_updates_pending_work(monkeypat
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id=server._team_client_session_id("demo", "run-1"),
         agent_id=41,
+        managed_runtime=True,
         reply_token="old-secret",
         reply_mode="confirm",
     )
@@ -579,6 +591,7 @@ def test_reply_mode_switch_rejects_changed_lead_identity(monkeypatch):
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id=server._team_client_session_id("demo", "run-1"),
         agent_id=41,
+        managed_runtime=True,
         reply_token="old-secret",
         reply_mode="confirm",
     )
@@ -614,6 +627,7 @@ def test_reply_mode_idempotent_retry_preserves_existing_capability(monkeypatch):
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id=server._team_client_session_id("demo", "run-1"),
         agent_id=41,
+        managed_runtime=True,
         reply_token="existing-secret",
         reply_mode="confirm",
     )
@@ -655,6 +669,7 @@ def test_reusing_binding_preserves_one_time_reply_token(monkeypatch):
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id=server._team_client_session_id("demo", "run-1"),
         agent_id=41,
+        managed_runtime=True,
         reply_token="one-time-secret",
     )
 
@@ -694,6 +709,7 @@ def test_binding_without_local_capability_forces_rotation(monkeypatch):
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id=server._team_client_session_id("demo", "run-1"),
         agent_id=41,
+        managed_runtime=True,
     )
 
     response = client.put(
@@ -743,6 +759,7 @@ def test_conflict_is_rejected_before_remote_create(monkeypatch):
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id="old-client",
         agent_id=9,
+        managed_runtime=True,
     )
 
     response = client.put(
@@ -816,6 +833,7 @@ def test_replace_deactivates_previous_project_route(monkeypatch):
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id="old-client",
         agent_id=9,
+        managed_runtime=True,
     )
 
     response = client.put(
@@ -859,6 +877,7 @@ def test_failed_replace_restores_previous_project_route(monkeypatch):
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id="old-client",
         agent_id=9,
+        managed_runtime=True,
     )
 
     response = client.put(
@@ -901,6 +920,7 @@ def test_unbind_only_removes_route_and_deactivates_managed_lead(monkeypatch):
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id="client-run-1",
         agent_id=41,
+        managed_runtime=True,
     )
     monkeypatch.setattr(
         server.herdr_client,
@@ -927,12 +947,21 @@ def test_logout_suspends_worker_revokes_remote_capability_and_keeps_binding(
     client, headers = _prepare(monkeypatch)
     calls = []
     monkeypatch.setattr(server.hub_client, "human_api", _human_api(calls=calls))
-    bound = client.put(
-        "/api/team-auth/session-bindings/demo",
-        headers=headers,
-        json={"session": "demo"},
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="demo",
+        session_generation="run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id=server._team_client_session_id("demo", "run-1"),
+        agent_id=41,
+        managed_runtime=True,
+        reply_token="reply-secret",
+        auth_expires_at=time.time() + 3600,
     )
-    assert bound.status_code == 200
     saved = team_sessions.list_bindings(HUB, 7)[0]
     server.team_lead_worker.poll_binding(
         saved,
@@ -990,3 +1019,105 @@ def test_logout_suspends_worker_revokes_remote_capability_and_keeps_binding(
     assert current["session"] == "demo"
     assert server.team_lead_worker.next_for_binding(saved) is None
     assert server._active_team_lead_bindings() == []
+
+
+def test_one_click_team_session_starts_read_only_before_binding(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    monkeypatch.setattr(server, "_chat_workspace", lambda workspace_id: {
+        "id": workspace_id,
+        "title": "HR Ready",
+        "path": PROJECT_KEY,
+    })
+    monkeypatch.setattr(server, "_next_team_session_name", lambda _slug: "team-demo-1")
+    created_calls = []
+    bind_calls = []
+
+    def create(workspace_id, req, *, session_name=None):
+        created_calls.append((workspace_id, req, session_name))
+        return {
+            "session": session_name,
+            "thread": {"id": "th-1"},
+            "agent_mail": {"ok": True},
+            "leader": {"leader_mail_name": "codex-main"},
+        }
+
+    def bind(slug, req, _request):
+        bind_calls.append((slug, req, _request.state.team_managed_runtime))
+        return {"ok": True, "binding": {"session": req.session}}
+
+    monkeypatch.setattr(server, "_create_chat_session", create)
+    monkeypatch.setattr(server, "api_team_session_bind", bind)
+
+    response = client.post(
+        "/api/team-auth/session-bindings/demo/create",
+        headers=headers,
+        json={
+            "workspace_id": "ws-1",
+            "agent": "codex",
+            "reply_mode": "auto",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["session"] == "team-demo-1"
+    workspace_id, create_req, session_name = created_calls[0]
+    assert workspace_id == "ws-1"
+    assert session_name == "team-demo-1"
+    assert create_req.args == "--sandbox read-only"
+    assert bind_calls[0][0] == "demo"
+    assert bind_calls[0][1].session == "team-demo-1"
+    assert bind_calls[0][1].reply_mode == "auto"
+    assert bind_calls[0][2] is True
+
+
+def test_one_click_team_session_rolls_back_when_lead_registration_fails(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    monkeypatch.setattr(server, "_chat_workspace", lambda workspace_id: {
+        "id": workspace_id,
+        "title": "HR Ready",
+        "path": PROJECT_KEY,
+    })
+    monkeypatch.setattr(server, "_next_team_session_name", lambda _slug: "team-demo-2")
+    monkeypatch.setattr(server, "_create_chat_session", lambda *_args, **_kwargs: {
+        "session": "team-demo-2",
+        "thread": {"id": "th-2"},
+        "agent_mail": {"ok": False, "reason": "registration failed"},
+        "leader": {},
+    })
+    rolled_back = []
+    monkeypatch.setattr(
+        server,
+        "_rollback_created_team_session",
+        lambda session: rolled_back.append(session) or {"stopped": True},
+    )
+
+    response = client.post(
+        "/api/team-auth/session-bindings/demo/create",
+        headers=headers,
+        json={"workspace_id": "ws-1", "agent": "codex"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["stage"] == "register_lead"
+    assert rolled_back == ["team-demo-2"]
+
+
+def test_one_click_team_session_rejects_agent_without_read_only_mode(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    monkeypatch.setattr(server, "_chat_workspace", lambda workspace_id: {
+        "id": workspace_id,
+        "title": "HR Ready",
+        "path": PROJECT_KEY,
+    })
+
+    response = client.post(
+        "/api/team-auth/session-bindings/demo/create",
+        headers=headers,
+        json={"workspace_id": "ws-1", "agent": "opencode"},
+    )
+
+    assert response.status_code == 400
+    assert "暂不支持 Team Session 只读模式" in response.text

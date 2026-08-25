@@ -1280,6 +1280,18 @@ export interface SessionRow {
   root: string | null // 归属的项目根目录；null = 未匹配到任何 root
 }
 
+export function withoutManagedTeamSessions(
+  rows: SessionRow[],
+  bindings: Array<{ session: string; managedRuntime?: boolean }>,
+): SessionRow[] {
+  const hidden = new Set(
+    bindings
+      .filter((binding) => binding.managedRuntime === true)
+      .map((binding) => binding.session),
+  )
+  return rows.filter((row) => !hidden.has(row.name))
+}
+
 export function buildSessionRows(
   sessions: HerdrSession[],
   snapshot: HerdrSnapshot | null,

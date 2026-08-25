@@ -7,7 +7,7 @@
 // Cockpit 4.0: 添加团队区（仅当配置 Team Hub 时显示）。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SessionRow } from '../group-chat/model'
-import type { TeamBinding, TeamSessionCandidate, TeamTopic } from '../team/model'
+import type { TeamBinding, TeamTopic } from '../team/model'
 import { useAppFrame } from './AppFrame'
 import { cx } from './cx'
 import {
@@ -53,7 +53,6 @@ export interface WorkspaceBrowserProps {
   teamIsAdmin?: boolean
   teamTopics?: TeamTopic[]
   teamBindings?: TeamBinding[]
-  teamSessions?: TeamSessionCandidate[]
   teamActiveTopic?: string | null
   onTeamLogin?: (username: string, password: string) => Promise<void>
   onTeamRegister?: (input: {
@@ -65,7 +64,6 @@ export interface WorkspaceBrowserProps {
   onTeamLogout?: () => Promise<void>
   onTeamChangePassword?: (newPassword: string) => Promise<void>
   onTeamJoin?: (projectSlug: string, mentionHandle: string) => Promise<void>
-  onTeamBindSession?: (projectSlug: string, sessionName: string) => Promise<void>
   onTeamSelectTopic?: (projectSlug: string) => void
   onOpenTeamAdmin?: () => void
 }
@@ -159,14 +157,12 @@ export function WorkspaceBrowser({
   teamIsAdmin = false,
   teamTopics = [],
   teamBindings = [],
-  teamSessions = [],
   teamActiveTopic = null,
   onTeamLogin,
   onTeamRegister,
   onTeamLogout,
   onTeamChangePassword,
   onTeamJoin,
-  onTeamBindSession,
   onTeamSelectTopic,
   onOpenTeamAdmin,
 }: WorkspaceBrowserProps) {
@@ -431,14 +427,12 @@ export function WorkspaceBrowser({
                     isAdmin={teamIsAdmin}
                     topics={teamTopics}
                     bindings={teamBindings}
-                    sessionCandidates={teamSessions}
                     activeTopic={teamActiveTopic}
                     onLogin={onTeamLogin || (async () => {})}
                     onRegister={onTeamRegister || (async () => {})}
                     onLogout={onTeamLogout || (async () => {})}
                     onChangePassword={onTeamChangePassword || (async () => {})}
                     onJoin={onTeamJoin || (async () => {})}
-                    onBindSession={onTeamBindSession || (async () => {})}
                     onSelectTopic={onTeamSelectTopic || (() => {})}
                     onOpenTeamAdmin={onOpenTeamAdmin || (() => {})}
                   />
@@ -460,14 +454,12 @@ function TeamZoneSection({
   isAdmin,
   topics,
   bindings,
-  sessionCandidates,
   activeTopic,
   onLogin,
   onRegister,
   onLogout,
   onChangePassword,
   onJoin,
-  onBindSession,
   onSelectTopic,
   onOpenTeamAdmin,
 }: {
@@ -476,7 +468,6 @@ function TeamZoneSection({
   isAdmin: boolean
   topics: TeamTopic[]
   bindings: TeamBinding[]
-  sessionCandidates: TeamSessionCandidate[]
   activeTopic: string | null
   onLogin: (username: string, password: string) => Promise<void>
   onRegister: (input: {
@@ -488,7 +479,6 @@ function TeamZoneSection({
   onLogout: () => Promise<void>
   onChangePassword: (newPassword: string) => Promise<void>
   onJoin: (projectSlug: string, mentionHandle: string) => Promise<void>
-  onBindSession: (projectSlug: string, sessionName: string) => Promise<void>
   onSelectTopic: (projectSlug: string) => void
   onOpenTeamAdmin: () => void
 }) {
@@ -517,7 +507,6 @@ function TeamZoneSection({
   const [registerLoading, setRegisterLoading] = useState(false)
   const [registerError, setRegisterError] = useState<string | null>(null)
   const [registrationNotice, setRegistrationNotice] = useState<string | null>(null)
-  const [bindingTopic, setBindingTopic] = useState<string | null>(null)
   const [changingPassword, setChangingPassword] = useState(false)
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -619,15 +608,6 @@ function TeamZoneSection({
       setJoinError(err instanceof Error ? err.message : String(err))
     } finally {
       setJoinLoading(false)
-    }
-  }
-
-  const handleBind = async (projectSlug: string, sessionName: string) => {
-    try {
-      await onBindSession(projectSlug, sessionName)
-      setBindingTopic(null)
-    } catch (err) {
-      alert(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -879,20 +859,16 @@ function TeamZoneSection({
 
       {topics.map((topic) => {
         const binding = bindings.find((b) => b.project_slug === topic.slug)
-        const selectableCandidates = sessionCandidates.filter((candidate) => (
-          candidate.ready
-          && (!binding?.projectRef || candidate.projectRef === binding.projectRef)
-        ))
         const membershipStatus = topic.membership === undefined
           ? 'active'
           : topic.membership?.status ?? ''
         const isActive = membershipStatus === 'active'
         const isInvited = membershipStatus === 'invited'
         const canRequestJoin = !membershipStatus || membershipStatus === 'removed'
-        const isBound = isActive && !!binding
-        const bindingIsLive = !!binding && binding.active !== false && binding.ready !== false
+        const isBound = isActive && binding?.managedRuntime === true
+        const bindingIsLive = isBound && binding.active !== false && binding.ready !== false
+        const isLegacyBinding = isActive && !!binding && binding.managedRuntime !== true
         const bindingProblem = binding?.reason || '已停止'
-        const isBinding = bindingTopic === topic.slug
         const isJoining = joiningTopic === topic.slug
 
         return (
@@ -900,20 +876,22 @@ function TeamZoneSection({
             <button
               type="button"
               className={cx(css.sessionRow, activeTopic === topic.slug && css.selected)}
-              onClick={() => isBound && onSelectTopic(topic.slug)}
-              disabled={!isBound}
+              onClick={() => isActive && onSelectTopic(topic.slug)}
+              disabled={!isActive}
               title={
-                isBound
-                  ? `打开 ${topic.name}（绑定到 ${binding.session}${bindingIsLive ? '' : `，${bindingProblem}`}）`
-                  : isActive
-                    ? `${topic.name}（需要先绑定本机 Session）`
-                    : isInvited
+                isActive
+                  ? isBound
+                    ? `打开 ${topic.name}（Agent ${binding.session}${bindingIsLive ? '' : `，${bindingProblem}`}）`
+                    : isLegacyBinding
+                      ? `打开 ${topic.name}（旧绑定待迁移）`
+                      : `打开 ${topic.name}（尚未创建 Topic Agent）`
+                  : isInvited
                       ? `${topic.name}（加入申请等待审批）`
                       : `${topic.name}（尚未加入）`
               }
               style={{
-                opacity: isBound ? 1 : 0.6,
-                cursor: isBound ? 'pointer' : 'not-allowed',
+                opacity: isActive ? 1 : 0.6,
+                cursor: isActive ? 'pointer' : 'not-allowed',
               }}
             >
               <span className={css.slot}>
@@ -923,33 +901,9 @@ function TeamZoneSection({
               <span className={css.meta}>
                 {isBound
                   ? `→ ${binding.session}${bindingIsLive ? '' : `（${bindingProblem}）`}`
-                  : isActive ? '未绑定' : isInvited ? '等待审批' : '未加入'}
+                  : isLegacyBinding ? '旧绑定待迁移' : isActive ? '未启用 Agent' : isInvited ? '等待审批' : '未加入'}
               </span>
             </button>
-
-            {isActive && !isBinding && (
-              <button
-                type="button"
-                onClick={() => setBindingTopic(topic.slug)}
-                title={isBound ? '更换本机 Session' : '绑定本机 Session'}
-                style={{
-                  position: 'absolute',
-                  right: '8px',
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  background: 'var(--dsw-alias-state-business-primary)',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  padding: '4px 10px',
-                  fontSize: '11px',
-                  cursor: 'pointer',
-                  fontWeight: 500,
-                }}
-              >
-                {isBound ? '改绑' : '绑定'}
-              </button>
-            )}
 
             {canRequestJoin && !isJoining && (
               <button
@@ -989,65 +943,6 @@ function TeamZoneSection({
               </form>
             )}
 
-            {isBinding && (
-              <div style={{
-                background: 'var(--dsw-alias-bg-base)',
-                border: '1px solid var(--dsw-alias-border-l1)',
-                borderRadius: '6px',
-                padding: '8px',
-                margin: '4px 8px 8px',
-              }}>
-                <div style={{ fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '6px' }}>
-                  选择本机 Session：
-                </div>
-                {selectableCandidates.length === 0 && (
-                  <div style={{ padding: '6px 2px', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)' }}>
-                    没有与该项目匹配且负责人可用的 Session
-                  </div>
-                )}
-                {selectableCandidates.map((sess) => (
-                  <button
-                    key={sess.name}
-                    type="button"
-                    title={sess.reason ?? sess.label}
-                    onClick={() => handleBind(topic.slug, sess.name)}
-                    style={{
-                      display: 'block',
-                      width: '100%',
-                      padding: '6px 10px',
-                      background: 'var(--dsw-alias-bg-l2)',
-                      border: '1px solid var(--dsw-alias-border-l1)',
-                      borderRadius: '4px',
-                      color: 'var(--dsw-alias-label-primary)',
-                      cursor: 'pointer',
-                      fontSize: '12px',
-                      textAlign: 'left',
-                      marginBottom: '4px',
-                    }}
-                  >
-                    {sess.label}
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => setBindingTopic(null)}
-                  style={{
-                    display: 'block',
-                    width: '100%',
-                    padding: '6px 10px',
-                    background: 'var(--dsw-alias-bg-base)',
-                    border: '1px solid var(--dsw-alias-border-l1)',
-                    borderRadius: '4px',
-                    color: 'var(--dsw-alias-label-tertiary)',
-                    cursor: 'pointer',
-                    fontSize: '12px',
-                    marginTop: '4px',
-                  }}
-                >
-                  取消
-                </button>
-              </div>
-            )}
           </div>
         )
       })}
