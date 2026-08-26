@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { requireAuthenticated } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import { createChatSession } from '../../api/chatLedger'
-import { AGENT_KINDS, agentEmoji, buildLaunchArgs, rootBase, type PermissionMode } from './model'
+import { AGENT_KINDS, agentEmoji, buildLaunchOptions, rootBase, type PermissionMode } from './model'
 
 interface NewSessionWizardProps {
   open: boolean
@@ -38,6 +38,7 @@ export function NewSessionWizard({
 }: NewSessionWizardProps) {
   const [kind, setKind] = useState<string>(AGENT_KINDS[0])
   const [model, setModel] = useState('')
+  const [launchArgs, setLaunchArgs] = useState('')
   const [permission, setPermission] = useState<PermissionMode>('ask')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -78,10 +79,8 @@ export function NewSessionWizard({
     setBusy(true)
     setError(null)
     try {
-      const res = await createChatSession(workspaceId, kind, sessionName, {
-        model: model.trim() || undefined,
-        args: buildLaunchArgs(kind, model, permission) || undefined,
-      })
+      const launch = buildLaunchOptions(kind, model, permission, launchArgs)
+      const res = await createChatSession(workspaceId, kind, sessionName, launch)
       onCreated(res.session)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e))
@@ -119,11 +118,25 @@ export function NewSessionWizard({
         <span className="gc-field-label">模型（可选）</span>
         <input
           className="gc-input"
+          aria-label="模型（可选）"
           value={model}
-          placeholder={kind === 'kimi' ? 'kimi-code/k3' : '启动时 -m'}
+          placeholder={kind === 'kimi' ? 'kimi-code/k3' : 'gpt-5.6-sol'}
+          maxLength={2048}
           disabled={busy}
           onChange={(e) => setModel(e.target.value)}
         />
+
+        <span className="gc-field-label">启动参数（可选）</span>
+        <input
+          className="gc-input"
+          aria-label="启动参数（可选）"
+          value={launchArgs}
+          placeholder={"-c 'model_reasoning_effort=\"xhigh\"'"}
+          maxLength={2048}
+          disabled={busy}
+          onChange={(e) => setLaunchArgs(e.target.value)}
+        />
+        <p className="gc-modal-sub">按命令行参数解析，不执行额外 shell 命令。</p>
 
         {kind === 'kimi' && (
           <>

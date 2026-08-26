@@ -7,6 +7,7 @@ import type { HerdrPane } from '../api/legacyHerdr'
 import {
   AGENT_KINDS,
   buildLaunchArgs,
+  buildLaunchOptions,
   buildSessionRows,
   canRecallEntry,
   isHumanSender,
@@ -680,6 +681,29 @@ describe('launch / recall helpers', () => {
     expect(buildLaunchArgs('kimi', 'kimi-code/k3', 'yolo')).toBe('-m kimi-code/k3 -y')
     expect(buildLaunchArgs('kimi', '', 'auto')).toBe('--auto')
     expect(buildLaunchArgs('codex', 'gpt-5', 'yolo')).toBe('-m gpt-5')
+  })
+
+  it('模型和原始启动参数分开传递，并兼容模型框里的旧参数写法', () => {
+    expect(
+      buildLaunchOptions(
+        'codex',
+        'gpt-5.6-sol',
+        'ask',
+        '-c \'model_reasoning_effort="xhigh"\'',
+      ),
+    ).toEqual({
+      model: 'gpt-5.6-sol',
+      args: '-c \'model_reasoning_effort="xhigh"\'',
+    })
+    expect(
+      buildLaunchOptions(
+        'codex',
+        '-m gpt-5.6-sol -c \'model_reasoning_effort="xhigh"\'',
+      ),
+    ).toEqual({
+      args: '-m gpt-5.6-sol -c \'model_reasoning_effort="xhigh"\'',
+    })
+    expect(buildLaunchOptions('kimi', '', 'auto')).toEqual({ args: '--auto' })
   })
 
   it('组字中或 IME 229 回车不发送', () => {

@@ -120,3 +120,29 @@ def test_remote_hub_allows_agent_creation_without_local_database(monkeypatch):
         "write_reason": None,
     }
     assert server._agent_mail_requirement() is None
+
+
+def test_agent_mail_status_exposes_discovered_database_and_hub(monkeypatch):
+    monkeypatch.setattr(
+        server.db,
+        "status",
+        lambda: {
+            "available": True,
+            "reason": None,
+            "path": "/home/demo/.local/share/mcp_agent_mail/storage.sqlite3",
+        },
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "status",
+        lambda: {
+            "available": True,
+            "reason": None,
+            "hub": "http://127.0.0.1:8765",
+        },
+    )
+
+    status = server._agent_mail_status()
+
+    assert status["path"] == "/home/demo/.local/share/mcp_agent_mail/storage.sqlite3"
+    assert status["hub"] == "http://127.0.0.1:8765"

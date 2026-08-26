@@ -159,6 +159,8 @@ export const legacyEnvCheckPayload = {
   agent_mail: {
     available: true,
     reason: null,
+    path: '/home/demo/.local/share/mcp_agent_mail/storage.sqlite3',
+    hub: 'http://127.0.0.1:8765',
     read_available: true,
     write_available: true,
     write_reason: null,

@@ -12,7 +12,11 @@ vi.mock('../api/legacyHerdr', async () => {
   }
 })
 
-import { closePane, restartPane } from '../api/legacyHerdr'
+vi.mock('../api/auth', () => ({
+  requireAuthenticated: vi.fn().mockResolvedValue(undefined),
+}))
+
+import { closePane, restartPane, startAgent } from '../api/legacyHerdr'
 
 const baseProps = {
   members: [],
@@ -117,6 +121,56 @@ describe('MemberPanel Herdr 终端入口', () => {
     fireEvent.click(screen.getByRole('button', { name: '＋' }))
     expect(screen.getByText('未检测到已安装的 Agent CLI。')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '添加' })).toBeDisabled()
+  })
+
+  it('添加成员把模型和启动参数分别传递', async () => {
+    vi.mocked(startAgent).mockResolvedValue({ pane_id: '%codex' })
+    render(
+      <MemberPanel
+        {...baseProps}
+        session="demo-1"
+        onOpenTerminal={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '＋' }))
+    fireEvent.change(screen.getByLabelText('模型（可选）'), {
+      target: { value: 'gpt-5.6-sol' },
+    })
+    fireEvent.change(screen.getByLabelText('启动参数（可选）'), {
+      target: { value: '-c \'model_reasoning_effort="xhigh"\'' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+
+    await waitFor(() => {
+      expect(startAgent).toHaveBeenCalledWith(expect.objectContaining({
+        model: 'gpt-5.6-sol',
+        args: '-c \'model_reasoning_effort="xhigh"\'',
+      }))
+    })
+  })
+
+  it('兼容把整段启动参数粘进模型框，不重复添加 -m', async () => {
+    vi.mocked(startAgent).mockResolvedValue({ pane_id: '%codex' })
+    render(
+      <MemberPanel
+        {...baseProps}
+        session="demo-1"
+        onOpenTerminal={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '＋' }))
+    const args = '-m gpt-5.6-sol -c \'model_reasoning_effort="xhigh"\''
+    fireEvent.change(screen.getByLabelText('模型（可选）'), {
+      target: { value: args },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+
+    await waitFor(() => {
+      expect(startAgent).toHaveBeenCalledWith(expect.objectContaining({ args }))
+      expect(startAgent).toHaveBeenCalledWith(
+        expect.not.objectContaining({ model: expect.anything() }),
+      )
+    })
   })
 
   it('群成员显示各自 Agent 的矢量图标', () => {

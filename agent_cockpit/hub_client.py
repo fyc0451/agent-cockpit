@@ -55,18 +55,26 @@ class HumanAuthError(RuntimeError):
 def status() -> dict[str, Any]:
     """轻量检查 Agent Mail Hub 是否可写，不发送 token 或 MCP 请求。"""
     if not TOKEN:
-        return {"available": False, "reason": "Agent Mail Hub token 未配置"}
+        return {
+            "available": False,
+            "reason": "Agent Mail Hub token 未配置",
+            "hub": HUB,
+        }
     parsed = urlsplit(HUB)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     if not host:
-        return {"available": False, "reason": "Agent Mail Hub 地址无效"}
+        return {"available": False, "reason": "Agent Mail Hub 地址无效", "hub": HUB}
     try:
         with socket.create_connection((host, port), timeout=1):
             pass
     except OSError as exc:
-        return {"available": False, "reason": f"Agent Mail Hub 不可连接: {exc}"}
-    return {"available": True, "reason": None}
+        return {
+            "available": False,
+            "reason": f"Agent Mail Hub 不可连接: {exc}",
+            "hub": HUB,
+        }
+    return {"available": True, "reason": None, "hub": HUB}
 
 
 def _next_id() -> int:

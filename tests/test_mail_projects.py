@@ -248,6 +248,45 @@ def test_archived_stale_binding_is_replaced_by_unique_active_candidate(
     assert mail_projects.get("demo", str(state_dir)) == str(active)
 
 
+def test_missing_bound_project_is_invalidated_without_breaking_state(
+    monkeypatch, tmp_path,
+):
+    session_dir = tmp_path / "herdr-state"
+    project = tmp_path / "removed-project"
+    session_dir.mkdir()
+    project.mkdir()
+    mail_projects.bind("demo", str(session_dir), str(project))
+    project.rename(tmp_path / "archived-project")
+    original_require_project = server.next_profile.require_project
+
+    def require_existing_project(value, environment=None):
+        if not Path(value).is_dir():
+            raise server.next_profile.NextProfileError("next_project_forbidden")
+        return original_require_project(value, environment)
+
+    monkeypatch.setattr(
+        server.next_profile, "require_project", require_existing_project,
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "list_sessions",
+        lambda: [{"name": "demo", "status": "stopped", "directory": str(session_dir)}],
+    )
+    monkeypatch.setattr(
+        server, "_herdr_runtime_snapshot", lambda: {"sessions": [], "panes": []},
+    )
+    monkeypatch.setattr(
+        server.db, "status", lambda: {"available": False, "reason": "test"},
+    )
+
+    state = server._mail_project_state("demo")
+
+    assert state["bound"] is False
+    assert state["project"] is None
+    assert state["binding_invalidated"] is True
+    assert mail_projects.get("demo", str(session_dir)) is None
+
+
 def test_identity_endpoint_uses_bound_project_not_pane_cwd(monkeypatch, tmp_path):
     project = tmp_path / "project"
     worktree = tmp_path / "worktree"

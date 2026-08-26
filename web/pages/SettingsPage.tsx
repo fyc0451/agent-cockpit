@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
-import { useLegacyEnvCheck } from '../api/localSlice'
+import { useLegacyEnvCheck, type LegacyEnvCheck } from '../api/localSlice'
 import { fetchTeamConfig, saveTeamConfig, type TeamConfig } from '../api/teamConfig'
 import {
   fetchUpgradeStatus,
@@ -73,6 +73,16 @@ function DoctorRow({ name, ok, detail }: { name: string; ok: boolean; detail?: s
   )
 }
 
+function agentMailDoctorDetail(status: LegacyEnvCheck['agent_mail']): string {
+  if (!status.available) return status.reason ?? 'Agent Mail 不可用'
+  return [
+    status.path,
+    status.hub ? `Hub ${status.hub}` : '',
+    `读 ${status.read_available ? '可用' : '不可用'}`,
+    `写 ${status.write_available ? '可用' : '不可用'}`,
+  ].filter(Boolean).join(' · ')
+}
+
 function DoctorTab() {
   const q = useLegacyEnvCheck()
   return (
@@ -100,11 +110,7 @@ function DoctorTab() {
           <DoctorRow
             name="agent_mail"
             ok={q.data.agent_mail.available}
-            detail={
-              q.data.agent_mail.available
-                ? `读 ${q.data.agent_mail.read_available ? '可用' : '不可用'} · 写 ${q.data.agent_mail.write_available ? '可用' : '不可用'}`
-                : (q.data.agent_mail.reason ?? 'Agent Mail 不可用')
-            }
+            detail={agentMailDoctorDetail(q.data.agent_mail)}
           />
         </ul>
       )}

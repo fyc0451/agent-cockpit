@@ -1126,6 +1126,45 @@ def test_start_agent_renames_workspace_tab_and_pane(monkeypatch):
     assert call(["--session", "demo", "workspace", "rename", "w1", "demo"], timeout=5) in calls
 
 
+def test_start_agent_passes_model_and_config_as_distinct_native_argv(monkeypatch):
+    monkeypatch.setattr(herdr_client, "is_available", lambda: True)
+    monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: sys.executable)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    snapshots = iter([
+        {"panes": []},
+        {"panes": [{
+            "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
+        }]},
+    ])
+    monkeypatch.setattr(
+        herdr_client, "_snapshot_session", lambda session: next(snapshots),
+    )
+    calls = []
+
+    def fake_run(args, timeout=10):
+        calls.append(call(args, timeout=timeout))
+        if "create" in args:
+            return 'data: {"result":{"tab":{"focused_pane_id":"w1:p2"}}}'
+        return ""
+
+    monkeypatch.setattr(herdr_client, "_run", fake_run)
+
+    result = herdr_client.start_agent(
+        "demo", "/tmp/project", "codex", model="gpt-5.6-sol", layout="tab",
+        args='-c \'model_reasoning_effort="xhigh"\'',
+    )
+
+    assert result.get("error") is None
+    assert call(
+        [
+            "--session", "demo", "agent", "start", "codex-1",
+            "--kind", "codex", "--pane", "w1:p2", "--timeout", "60000",
+            "--", "-m", "gpt-5.6-sol", "-c", 'model_reasoning_effort="xhigh"',
+        ],
+        timeout=65,
+    ) in calls
+
+
 def test_start_agent_forces_opencode_to_tab_and_rolls_back_on_start_failure(monkeypatch):
     """opencode 强制独立 tab；原生 agent start 失败时回滚本次 pane，不回退键盘模拟。"""
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)

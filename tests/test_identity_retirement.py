@@ -371,6 +371,56 @@ def test_delete_session_stops_before_delete_and_aborts_on_stop_failure(monkeypat
     assert calls == [("stop", "demo")]
 
 
+def test_delete_session_continues_when_mail_project_hint_is_invalid(monkeypatch):
+    events = []
+    retirement = {
+        "requested": [INSTANCE_ID], "retired": [], "pending": [INSTANCE_ID],
+        "errors": {INSTANCE_ID: "missing project"}, "complete": False,
+    }
+    monkeypatch.setattr(
+        server.herdr_client, "stop_session",
+        lambda session: events.append(("stop", session))
+        or {"available": True, "stopped": session},
+    )
+    monkeypatch.setattr(
+        server, "_mail_project_state",
+        lambda session: events.append(("project", session))
+        or (_ for _ in ()).throw(
+            server.next_profile.NextProfileError("next_project_forbidden")
+        ),
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "delete_session",
+        lambda session: events.append(("delete", session))
+        or {"available": True, "deleted": session, "retirement_pending": [INSTANCE_ID]},
+    )
+    monkeypatch.setattr(
+        server, "_retire_pending_agent_instances",
+        lambda ids, project_hint=None: events.append(
+            ("retire", list(ids), project_hint)
+        ) or retirement,
+    )
+    monkeypatch.setattr(
+        server.coordination, "close_session",
+        lambda session, reason: events.append(("coordination", session, reason)),
+    )
+    monkeypatch.setattr(
+        server.mail_projects, "unbind",
+        lambda session: events.append(("unbind", session)),
+    )
+
+    result = server.api_herdr_session_delete("demo")
+
+    assert result["deleted"] == "demo"
+    assert result["partial"] is True
+    assert result["identity_retirement"] == retirement
+    assert events == [
+        ("stop", "demo"), ("project", "demo"), ("delete", "demo"),
+        ("retire", [INSTANCE_ID], None),
+        ("coordination", "demo", "deleted"), ("unbind", "demo"),
+    ]
+
+
 def test_delete_pane_retires_only_after_close_succeeds(monkeypatch):
     calls = []
     monkeypatch.setattr(

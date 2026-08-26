@@ -52,6 +52,57 @@ def _dev_env(home: Path, repo: Path) -> dict[str, str]:
     return values
 
 
+def test_dev_layout_keeps_legacy_agent_mail_default_when_undiscovered(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+
+    values = next_profile.dev_layout(home, repo)
+
+    assert values["AGENT_MAIL_DB_PATH"] == str(
+        home / "mcp_agent_mail/storage.sqlite3"
+    )
+
+
+def test_dev_layout_uses_discovered_xdg_agent_mail_database(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    database = home / ".local/share/mcp_agent_mail/storage.sqlite3"
+    database.parent.mkdir(parents=True)
+    database.touch()
+
+    values = next_profile.dev_layout(home, repo)
+
+    assert values["AGENT_MAIL_DB_PATH"] == str(database)
+
+
+def test_dev_profile_accepts_selected_agent_mail_path_after_discovery_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "code" / "agent-cockpit"
+    (home / "github").mkdir(parents=True)
+    repo.mkdir(parents=True)
+    (repo / ".agent-memory-project").write_text(
+        "agent-cockpit-next\n", encoding="ascii",
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    env = _dev_env(home, repo)
+    legacy = home / "mcp_agent_mail/storage.sqlite3"
+    xdg = home / ".local/share/mcp_agent_mail/storage.sqlite3"
+    assert env["AGENT_MAIL_DB_PATH"] == str(legacy)
+
+    xdg.parent.mkdir(parents=True)
+    xdg.touch()
+    next_profile.validate_server_environment(repo, env)
+
+    env["AGENT_MAIL_DB_PATH"] = str(xdg)
+    xdg.unlink()
+    next_profile.validate_server_environment(repo, env)
+
+
 def test_dev_fd_inventory_falls_back_to_dev_fd(monkeypatch):
     gate = _dev_server()._load_next_dev()
     listed = []
@@ -98,7 +149,7 @@ def test_dev_profile_accepts_this_checkout_on_8790(tmp_path: Path, monkeypatch: 
     assert next_profile.is_dev(env)
     assert not next_profile.is_ephemeral(env)
     assert env["AGENT_MAIL_DB_PATH"] == str(
-        home / ".local" / "share" / "mcp_agent_mail" / "storage.sqlite3"
+        home / "mcp_agent_mail" / "storage.sqlite3"
     )
     assert next_profile.project(env) == str(repo)
     assert next_profile.session(env) is None

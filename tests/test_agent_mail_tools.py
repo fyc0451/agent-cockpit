@@ -564,6 +564,17 @@ def test_db_path_prefers_xdg_then_keeps_legacy_compatible(monkeypatch, tmp_path)
     assert module._agent_mail_db_path() == str(legacy)
 
 
+def test_db_path_falls_back_to_legacy_default(monkeypatch, tmp_path):
+    module = _load_mail_send()
+    monkeypatch.delenv("AGENT_MAIL_DB_PATH", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert module._agent_mail_db_path() == str(
+        tmp_path / "mcp_agent_mail" / "storage.sqlite3"
+    )
+
+
 def test_init_project_registers_claude_and_qoder_command_identity():
     source = (ROOT / "agent_mail_commands" / "am_init_project.py").read_text(encoding="utf-8")
 

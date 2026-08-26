@@ -669,19 +669,50 @@ export const KIMI_MODELS = [
   'kimi-code/k3-256k',
 ] as const
 
+export interface AgentLaunchOptions {
+  model?: string
+  args?: string
+}
+
+/**
+ * 将模型和原始 argv 分开交给后端。兼容旧界面中把整段 `-m ...` 粘进模型框的用法，
+ * 避免再次自动补 `-m` 后让 CLI 立即退出、Herdr 一直等到 readiness 超时。
+ */
+export function buildLaunchOptions(
+  kind: string,
+  modelInput = '',
+  permission: PermissionMode = 'ask',
+  argsInput = '',
+): AgentLaunchOptions {
+  const modelOrArgs = modelInput.trim()
+  const rawArgs = argsInput.trim()
+  const args: string[] = []
+  let model: string | undefined
+
+  if (modelOrArgs.startsWith('-')) args.push(modelOrArgs)
+  else if (modelOrArgs) model = modelOrArgs
+  if (rawArgs) args.push(rawArgs)
+  if (kind === 'kimi') {
+    if (permission === 'yolo') args.push('-y')
+    if (permission === 'auto') args.push('--auto')
+  }
+
+  return {
+    ...(model ? { model } : {}),
+    ...(args.length ? { args: args.join(' ') } : {}),
+  }
+}
+
 /** 启动参数：模型走 -m；Kimi 权限走 -y / --auto。 */
 export function buildLaunchArgs(
   kind: string,
   model = '',
   permission: PermissionMode = 'ask',
 ): string {
+  const options = buildLaunchOptions(kind, model, permission)
   const parts: string[] = []
-  const trimmed = model.trim()
-  if (trimmed) parts.push('-m', trimmed)
-  if (kind === 'kimi') {
-    if (permission === 'yolo') parts.push('-y')
-    if (permission === 'auto') parts.push('--auto')
-  }
+  if (options.model) parts.push('-m', options.model)
+  if (options.args) parts.push(options.args)
   return parts.join(' ')
 }
 

@@ -33,3 +33,4 @@ design-system/
 docs/screenshots/verify-*.png
 docs/screenshots/ui-*.png
 docs/screenshots/*-fail.png
+logs/
