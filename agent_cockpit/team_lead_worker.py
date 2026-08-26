@@ -285,6 +285,8 @@ def poll_binding(
         command_hint = (
             "请原样执行以下固定本机命令读取（不要附加 --work-id）：\n"
             f"{team_work_command}\n"
+            "调用执行工具时使用 require_escalated；该精确前缀已由本机实例级 "
+            "allow 规则无审批放行。若前缀不完全一致，立即停止，不得扩大权限。"
             "取得受限消息后，回复时只在这条固定命令后追加 "
             "--work-id、--to、--subject、--body 参数；不要改写前缀。"
             if team_work_command
