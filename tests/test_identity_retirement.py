@@ -12,6 +12,7 @@ INSTANCE_ID = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 def _pending_descriptor(
     monkeypatch, tmp_path, *, instance_id=INSTANCE_ID, pane_id="w1:p2",
+    team=False,
 ):
     project = tmp_path / "project"
     project.mkdir(exist_ok=True)
@@ -20,8 +21,12 @@ def _pending_descriptor(
     )
     server.herdr_client.save_launch_descriptor(
         session="demo", pane_id=pane_id, name=instance_id, kind="codex",
-        args=[], agent="codex", workdir=str(project), instance_id=instance_id,
+        args=(
+            ["--disable", "hooks", "--sandbox", "read-only"] if team else []
+        ),
+        agent="codex", workdir=str(project), instance_id=instance_id,
         display_name="夜班",
+        launch_mode="team_readonly" if team else None,
     )
     server.herdr_client.update_launch_descriptor_by_instance(
         instance_id, mail_agent="codex", mail_instance=instance_id,
@@ -65,6 +70,29 @@ def test_retire_agent_instance_calls_exact_mail_identity_and_finalizes(
     )
     assert descriptor["state"] == "retired"
     assert descriptor.get("retirement_error") is None
+
+
+def test_retire_team_codex_removes_scoped_exec_rule_before_finalize(
+    monkeypatch, tmp_path,
+):
+    _pending_descriptor(monkeypatch, tmp_path, team=True)
+    retire_script = tmp_path / "am-retire"
+    retire_script.touch()
+    monkeypatch.setattr(server, "AM_RETIRE_SCRIPT", retire_script)
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "retired", ""),
+    )
+    removed = []
+    monkeypatch.setattr(
+        server.herdr_client, "remove_team_codex_exec_rule",
+        lambda instance_id: removed.append(instance_id) or True,
+    )
+
+    result = server._retire_agent_instance(INSTANCE_ID)
+
+    assert result == {"instance_id": INSTANCE_ID, "retired": True}
+    assert removed == [INSTANCE_ID]
 
 
 def test_retire_agent_instance_failure_stays_pending_for_retry(

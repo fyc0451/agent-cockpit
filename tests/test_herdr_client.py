@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -3645,6 +3646,13 @@ def _codexhome_harness(
     )
     monkeypatch.setattr(herdr_client, "_find_agent_bin", lambda name: "/bin/sh")
     monkeypatch.setattr(herdr_client, "time", herdr_client.time)
+    monkeypatch.setattr(
+        herdr_client, "ensure_team_codex_exec_rule",
+        lambda instance_id, project: (tmp_path / f"{instance_id}.rules", True),
+    )
+    monkeypatch.setattr(
+        herdr_client, "remove_team_codex_exec_rule", lambda _instance_id: True,
+    )
 
     pending: list[dict] = list(snapshots or [])
     polls: list[dict] = []
@@ -3917,6 +3925,71 @@ def test_team_readonly_start_uses_atomic_pane_run_without_provider(
         "--disable", "hooks", "--sandbox", "read-only",
     ]
     assert descriptor["launch_mode"] == "team_readonly"
+
+
+def test_team_codex_exec_rule_is_instance_and_project_scoped(
+    monkeypatch, tmp_path,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    project = tmp_path / "project with space"
+    tool = tmp_path / "team-work"
+    codex_home.mkdir()
+    project.mkdir()
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o700)
+    monkeypatch.setattr(herdr_client, "_user_default_codex_home", lambda: codex_home)
+    monkeypatch.setattr(herdr_client, "_team_work_tool_path", lambda: tool)
+
+    path, changed = herdr_client.ensure_team_codex_exec_rule(
+        _CODEXHOME_INSTANCE, str(project),
+    )
+    second_path, second_changed = herdr_client.ensure_team_codex_exec_rule(
+        _CODEXHOME_INSTANCE, str(project),
+    )
+
+    assert changed is True
+    assert second_changed is False
+    assert second_path == path
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    contents = path.read_text(encoding="utf-8")
+    expected_pattern = [
+        str(tool), "--agent", "codex", "--instance", _CODEXHOME_INSTANCE,
+        "--project", str(project.resolve()),
+    ]
+    assert f"pattern = {json.dumps(expected_pattern, ensure_ascii=False)}" in contents
+    assert 'decision = "allow"' in contents
+    assert "--ask-for-approval" not in contents
+    assert "network_access" not in contents
+    assert herdr_client.remove_team_codex_exec_rule(_CODEXHOME_INSTANCE) is True
+    assert herdr_client.remove_team_codex_exec_rule(_CODEXHOME_INSTANCE) is False
+    assert not path.exists()
+
+
+def test_team_readonly_start_fails_before_herdr_when_rule_is_unavailable(
+    monkeypatch,
+) -> None:
+    called = False
+
+    def start(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {"available": True, "pane_id": "w1:p2"}
+
+    monkeypatch.setattr(
+        herdr_client, "ensure_team_codex_exec_rule",
+        lambda *_args: (_ for _ in ()).throw(OSError("read only config")),
+    )
+    monkeypatch.setattr(herdr_client, "_start_agent_internal", start)
+
+    result = herdr_client.start_team_readonly_agent(
+        session=_CODEXHOME_SESSION,
+        workdir=_CODEXHOME_WORKDIR,
+        agent="codex",
+        instance_id=_CODEXHOME_INSTANCE,
+    )
+
+    assert result["error_code"] == "team_work_capability_unavailable"
+    assert called is False
 
 
 def test_team_readonly_entry_does_not_accept_caller_args(tmp_path) -> None:

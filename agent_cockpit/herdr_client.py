@@ -2183,6 +2183,95 @@ def _user_default_codex_home() -> Path:
     return Path.home() / ".codex"
 
 
+def _team_work_tool_path() -> Path:
+    tool = Path(__file__).resolve().parent.parent / "agent-mail-tools" / "team-work"
+    if not tool.is_file() or not os.access(tool, os.X_OK):
+        raise OSError("Team work capability tool unavailable")
+    return tool
+
+
+def _team_codex_exec_rule_path(instance_id: str) -> Path:
+    opaque_id = validate_agent_instance_id(instance_id)
+    return (
+        _user_default_codex_home().expanduser()
+        / "rules"
+        / f"agent-cockpit-team-{opaque_id}.rules"
+    )
+
+
+def _team_codex_exec_rule_contents(instance_id: str, project: str) -> str:
+    """只放行固定 Team 身份读取/回复其受限工作项的本机命令。"""
+    opaque_id = validate_agent_instance_id(instance_id)
+    project_path = Path(project).expanduser()
+    if not project_path.is_absolute():
+        raise ValueError("Team work project must be absolute")
+    project_path = project_path.resolve()
+    if not project_path.is_dir():
+        raise ValueError("Team work project unavailable")
+    pattern = [
+        str(_team_work_tool_path()), "--agent", "codex",
+        "--instance", opaque_id, "--project", str(project_path),
+    ]
+    command = shlex.join(pattern)
+    return "\n".join([
+        "# Managed by Agent Cockpit. Do not edit.",
+        "prefix_rule(",
+        f"    pattern = {json.dumps(pattern, ensure_ascii=False)},",
+        '    decision = "allow",',
+        '    justification = "Allow this Team Agent identity to use only its '
+        'bounded local work queue",',
+        f"    match = [{json.dumps(command, ensure_ascii=False)}],",
+        ")",
+        "",
+    ])
+
+
+def ensure_team_codex_exec_rule(instance_id: str, project: str) -> tuple[Path, bool]:
+    """原子安装实例级 Codex execpolicy；返回路径与是否新建/更新。"""
+    path = _team_codex_exec_rule_path(instance_id)
+    expected = _team_codex_exec_rule_contents(instance_id, project)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise OSError("Team Codex exec rule path is not a regular file")
+    if path.exists():
+        if not path.is_file():
+            raise OSError("Team Codex exec rule path is not a regular file")
+        current = path.read_text(encoding="utf-8")
+        if current == expected:
+            return path, False
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent),
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            stream.write(expected)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            Path(temporary).unlink()
+        except FileNotFoundError:
+            pass
+    return path, True
+
+
+def remove_team_codex_exec_rule(instance_id: str) -> bool:
+    """退休 Team identity 时清除其精确 execpolicy；不存在视为幂等成功。"""
+    path = _team_codex_exec_rule_path(instance_id)
+    try:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise OSError("Team Codex exec rule path is not a regular file")
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def _validate_workspace_codex_home(value: object) -> str:
     """Managed Codex 专属 CODEX_HOME：私有目录，绝不能落到用户全局 codex home。
 
@@ -3394,11 +3483,29 @@ def start_team_readonly_agent(
             "error_code": "team_readonly_agent_unsupported",
             "error": f"{agent} 暂不支持 Team Session 只读模式",
         }
-    return _start_agent_internal(
+    rule_created = False
+    if kind == "codex":
+        try:
+            _, rule_created = ensure_team_codex_exec_rule(instance_id, workdir)
+        except (OSError, ValueError) as exc:
+            return {
+                "available": True,
+                "error_code": "team_work_capability_unavailable",
+                "error": f"Team work capability unavailable: {exc}",
+            }
+    result = _start_agent_internal(
         session, workdir, agent=agent, model=model, layout="tab", label=label,
         args=shlex.join(public_args), instance_id=instance_id,
         direct_readonly=True,
     )
+    if kind == "codex" and rule_created and (
+        result.get("error") or not result.get("pane_id")
+    ):
+        try:
+            remove_team_codex_exec_rule(instance_id)
+        except OSError:
+            result["capability_cleanup_warning"] = "Team work capability cleanup failed"
+    return result
 
 
 def _start_agent_internal(

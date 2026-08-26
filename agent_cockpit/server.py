@@ -9766,6 +9766,11 @@ def _retire_agent_instance(
             if retired.returncode != 0:
                 detail = (retired.stderr or retired.stdout)[-500:].strip()
                 raise RuntimeError(detail or f"am-retire 退出码 {retired.returncode}")
+            if (
+                descriptor.get("launch_mode") == "team_readonly"
+                and descriptor.get("kind") == "codex"
+            ):
+                herdr_client.remove_team_codex_exec_rule(opaque_id)
             finalized = herdr_client.finalize_launch_descriptor_retirement(opaque_id)
             if not finalized:
                 raise RuntimeError("Hub 已退休，但本地 descriptor 不存在")
