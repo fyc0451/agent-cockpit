@@ -168,6 +168,8 @@ export interface LegacyEnvCheck {
   agent_mail: {
     available: boolean
     reason?: string | null
+    path?: string
+    hub?: string
     read_available?: boolean
     write_available?: boolean
     write_reason?: string | null
@@ -442,12 +444,18 @@ export function assertLegacyEnvCheck(raw: unknown): LegacyEnvCheck {
   const mail = reqObj(o.agent_mail, 'env-check.agent_mail')
   const reason = mail.reason
   if (reason !== undefined && reason !== null && typeof reason !== 'string') fail('env-check.agent_mail.reason')
+  const path = mail.path
+  if (path !== undefined && typeof path !== 'string') fail('env-check.agent_mail.path')
+  const hub = mail.hub
+  if (hub !== undefined && typeof hub !== 'string') fail('env-check.agent_mail.hub')
   return {
     herdr: item(o.herdr, 'env-check.herdr'),
     agents,
     agent_mail: {
       available: reqBool(mail.available, 'env-check.agent_mail.available'),
       reason: (reason ?? null) as string | null,
+      ...(typeof path === 'string' ? { path } : {}),
+      ...(typeof hub === 'string' ? { hub } : {}),
       read_available: optBool(mail.read_available, 'env-check.agent_mail.read_available'),
       write_available: optBool(mail.write_available, 'env-check.agent_mail.write_available'),
       write_reason:

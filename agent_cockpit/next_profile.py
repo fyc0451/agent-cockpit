@@ -8,7 +8,7 @@ import stat
 from pathlib import Path
 from typing import Mapping
 
-from agent_cockpit import auth_token
+from agent_cockpit import agent_mail_discovery, auth_token
 
 
 PROFILE_ENV = "COCKPIT_NEXT_PROFILE"
@@ -48,13 +48,9 @@ def dev_layout(home: Path, repo: Path) -> dict[str, str]:
     config = home / ".config" / "agent-cockpit"
     state = home / ".local" / "state" / "agent-cockpit"
     uploads = home / "dashboard-uploads"
-    agent_mail_candidates = (
-        home / ".local" / "share" / "mcp_agent_mail" / "storage.sqlite3",
-        home / "mcp_agent_mail" / "storage.sqlite3",
-    )
-    agent_mail_db = next(
-        (path for path in agent_mail_candidates if path.is_file()),
-        agent_mail_candidates[0],
+    agent_mail_db = agent_mail_discovery.discover_agent_mail_db_path(
+        home=home,
+        data_home=home / ".local" / "share",
     )
     return {
         "COCKPIT_NEXT_WORKTREE": str(repo),
@@ -1339,6 +1335,19 @@ def _validate_dev_server_environment(
     for name, wanted in expected.items():
         # 与 session() 一致：dev 允许多 herdr session，不锁死 github-agent-cockpit-next。
         if name == "HERDR_SESSION":
+            continue
+        # 启动后 Agent Mail 可能迁移/自愈；已选中的新旧兼容路径都保持合法，
+        # 避免后续 helper 因文件出现或消失而把同一 server 环境判为失效。
+        if name == "AGENT_MAIL_DB_PATH":
+            compatible = {
+                str(path)
+                for path in agent_mail_discovery.agent_mail_db_candidates(
+                    home=home,
+                    data_home=home / ".local" / "share",
+                )
+            }
+            if env.get(name) not in compatible:
+                raise NextProfileError(f"next_profile_invalid:{name}")
             continue
         if env.get(name) != wanted:
             raise NextProfileError(f"next_profile_invalid:{name}")

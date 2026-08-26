@@ -45,6 +45,11 @@ describe('设置挂在 3.0 外壳', () => {
     expect(await screen.findByRole('tab', { name: '环境自检' })).toHaveAttribute('aria-selected', 'true')
     expect(await screen.findByText('Herdr 未运行')).toBeInTheDocument()
     expect(screen.getByText('agent_mail')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        '/home/demo/.local/share/mcp_agent_mail/storage.sqlite3 · Hub http://127.0.0.1:8765 · 读 可用 · 写 可用',
+      ),
+    ).toBeInTheDocument()
   })
 
   it('侧栏点设置进入 /settings，点会话回到群聊', async () => {

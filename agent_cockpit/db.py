@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from . import next_profile
+from . import agent_mail_discovery, next_profile
 
 
 def _scope() -> str | None:
@@ -22,16 +22,13 @@ def _scope() -> str | None:
     return next_profile.project()
 
 def _resolve_db_path() -> Path:
-    """按显式配置、新版 XDG 安装目录、旧目录依次探测 Agent Mail DB。"""
-    configured = os.environ.get("AGENT_MAIL_DB_PATH")
-    if configured:
-        return Path(configured).expanduser()
-    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    candidates = (
-        data_home / "mcp_agent_mail" / "storage.sqlite3",
-        Path.home() / "mcp_agent_mail" / "storage.sqlite3",
+    """显式配置优先；探测已安装 DB；无发现时保留旧路径默认值。"""
+    data_home_value = os.environ.get("XDG_DATA_HOME")
+    return agent_mail_discovery.discover_agent_mail_db_path(
+        configured=os.environ.get("AGENT_MAIL_DB_PATH"),
+        home=Path.home(),
+        data_home=Path(data_home_value) if data_home_value else None,
     )
-    return next((path for path in candidates if path.is_file()), candidates[0])
 
 
 DB_PATH = _resolve_db_path()
@@ -69,12 +66,20 @@ def _one(sql: str, params: tuple = ()) -> dict[str, Any] | None:
 def status() -> dict[str, Any]:
     """Agent Mail 是否可用；调用方据此只降级消息能力。"""
     if not DB_PATH.is_file():
-        return {"available": False, "reason": f"Agent Mail 数据库不存在: {DB_PATH}"}
+        return {
+            "available": False,
+            "reason": f"Agent Mail 数据库不存在: {DB_PATH}",
+            "path": str(DB_PATH),
+        }
     try:
         _one("SELECT 1 AS ok")
     except Exception as exc:
-        return {"available": False, "reason": f"Agent Mail 数据库不可读: {exc}"}
-    return {"available": True, "reason": None}
+        return {
+            "available": False,
+            "reason": f"Agent Mail 数据库不可读: {exc}",
+            "path": str(DB_PATH),
+        }
+    return {"available": True, "reason": None, "path": str(DB_PATH)}
 
 
 # ── 全局聚合 ────────────────────────────────────────────────────

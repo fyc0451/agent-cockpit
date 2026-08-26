@@ -10,7 +10,7 @@ import {
   AGENT_KINDS,
   agentEmoji,
   avatarColor,
-  buildLaunchArgs,
+  buildLaunchOptions,
   statusMeta,
   unreadCountLabel,
   type ChatMember,
@@ -48,6 +48,7 @@ function AddMemberModal({
   const [kind, setKind] = useState<string>(availableAgentKinds[0] ?? '')
   const [name, setName] = useState('')
   const [model, setModel] = useState('')
+  const [launchArgs, setLaunchArgs] = useState('')
   const [permission, setPermission] = useState<PermissionMode>('ask')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -69,6 +70,7 @@ function AddMemberModal({
     setBusy(true)
     setError(null)
     try {
+      const launch = buildLaunchOptions(kind, model, permission, launchArgs)
       const res = await startAgent({
         session,
         workdir,
@@ -76,7 +78,7 @@ function AddMemberModal({
         name: name.trim() || undefined,
         layout: 'tab',
         workspace: 'shared',
-        args: buildLaunchArgs(kind, model, permission),
+        ...launch,
       })
       if (res.error) {
         setError(res.error)
@@ -121,6 +123,7 @@ function AddMemberModal({
         <span className="gc-field-label">显示名（可选）</span>
         <input
           className="gc-input"
+          aria-label="显示名（可选）"
           value={name}
           placeholder={kind}
           disabled={busy}
@@ -130,11 +133,25 @@ function AddMemberModal({
         <span className="gc-field-label">模型（可选）</span>
         <input
           className="gc-input"
+          aria-label="模型（可选）"
           value={model}
-          placeholder={kind === 'kimi' ? 'kimi-code/k3' : '启动时 -m'}
+          placeholder={kind === 'kimi' ? 'kimi-code/k3' : 'gpt-5.6-sol'}
+          maxLength={2048}
           disabled={busy}
           onChange={(e) => setModel(e.target.value)}
         />
+
+        <span className="gc-field-label">启动参数（可选）</span>
+        <input
+          className="gc-input"
+          aria-label="启动参数（可选）"
+          value={launchArgs}
+          placeholder={"-c 'model_reasoning_effort=\"xhigh\"'"}
+          maxLength={2048}
+          disabled={busy}
+          onChange={(e) => setLaunchArgs(e.target.value)}
+        />
+        <p className="gc-modal-sub">按命令行参数解析，不执行额外 shell 命令。</p>
 
         {kind === 'kimi' && (
           <>

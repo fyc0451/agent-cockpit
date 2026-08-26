@@ -763,6 +763,16 @@ def test_agent_mail_db_explicit_path_has_priority(monkeypatch, tmp_path):
     assert db._resolve_db_path() == configured
 
 
+def test_agent_mail_db_uses_legacy_default_when_nothing_is_discovered(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("AGENT_MAIL_DB_PATH", raising=False)
+
+    assert db._resolve_db_path() == tmp_path / "mcp_agent_mail" / "storage.sqlite3"
+
+
 def test_db_queries_serialize_shared_connection(monkeypatch):
     first_entered = threading.Event()
     release_first = threading.Event()

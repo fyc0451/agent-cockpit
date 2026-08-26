@@ -2117,12 +2117,16 @@ def _collaborator_hint(name: str, project: str) -> str:
 def _agent_mail_status() -> dict[str, Any]:
     read_status = db.status()
     write_status = hub_client.status()
-    return {
+    result = {
         **read_status,
         "read_available": read_status["available"],
         "write_available": write_status["available"],
         "write_reason": write_status["reason"],
     }
+    hub = write_status.get("hub")
+    if isinstance(hub, str) and hub:
+        result["hub"] = hub
+    return result
 
 
 def _agent_mail_requirement() -> dict[str, Any] | None:
@@ -10089,7 +10093,9 @@ def api_herdr_pane_delete(session: str, pane_id: str):
             state = _mail_project_state(session)
             if state.get("bound") and state.get("project"):
                 project_hint = str(state["project"])
-        except (OSError, ValueError, HTTPException):
+        except (
+            OSError, ValueError, HTTPException, next_profile.NextProfileError,
+        ):
             pass
         _attach_identity_retirement(result, project_hint=project_hint)
     return result
@@ -10133,7 +10139,9 @@ def api_herdr_session_delete(name: str):
         state = _mail_project_state(name)
         if state.get("bound") and state.get("project"):
             project_hint = str(state["project"])
-    except (OSError, ValueError, HTTPException):
+    except (
+        OSError, ValueError, HTTPException, next_profile.NextProfileError,
+    ):
         pass
     result = herdr_client.delete_session(name)
     if result.get("deleted"):
@@ -10416,8 +10424,17 @@ def _mail_project_suggestion(pane_paths: list[str]) -> str:
 def _mail_project_state(name: str) -> dict[str, Any]:
     record = _session_record(name)
     session_dir = str(Path(record["directory"]).expanduser().resolve())
-    project = mail_projects.get(name, session_dir)
     binding_invalidated = False
+    try:
+        project = mail_projects.get(name, session_dir)
+    except next_profile.NextProfileError as exc:
+        # 绑定项目可能先于 Herdr session 被移动或删除。它只是通信清理提示，
+        # 不能让状态查询、关闭 pane 或删除 session 一起变成 500。
+        if str(exc) != "next_project_forbidden":
+            raise
+        mail_projects.unbind(name, session_dir)
+        project = None
+        binding_invalidated = True
     if project and db.status()["available"]:
         try:
             active_projects = {item["human_key"] for item in db.list_projects()}

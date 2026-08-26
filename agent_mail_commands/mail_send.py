@@ -25,7 +25,8 @@ from .common import (
     REGISTRY_DIR, helper_command, load_identity, mcp_call, mcp_tool, slugify,
 )
 from agent_cockpit import (  # noqa: E402
-    chat_ledger, chat_roster, coordination, next_profile, team_sessions,
+    agent_mail_discovery, chat_ledger, chat_roster, coordination, next_profile,
+    team_sessions,
 )
 
 
@@ -124,13 +125,12 @@ def _runtime_kind(agent: str) -> str:
 
 
 def _agent_mail_db_path() -> str:
-    configured = os.environ.get("AGENT_MAIL_DB_PATH")
-    if configured:
-        return os.path.expanduser(configured)
-    data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    new = os.path.join(data_home, "mcp_agent_mail", "storage.sqlite3")
-    legacy = os.path.expanduser("~/mcp_agent_mail/storage.sqlite3")
-    return next((path for path in (new, legacy) if os.path.isfile(path)), new)
+    data_home_value = os.environ.get("XDG_DATA_HOME")
+    return str(agent_mail_discovery.discover_agent_mail_db_path(
+        configured=os.environ.get("AGENT_MAIL_DB_PATH"),
+        home=Path.home(),
+        data_home=Path(data_home_value) if data_home_value else None,
+    ))
 
 
 def _program_by_name(name: str, project_key: str) -> str:
