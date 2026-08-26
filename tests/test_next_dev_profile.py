@@ -130,6 +130,35 @@ def test_dev_profile_accepts_this_checkout_on_8790(tmp_path: Path, monkeypatch: 
         launcher.dev_values(repo, home, "192.168.1.5")
 
 
+def test_dev_profile_uses_existing_legacy_agent_mail_db(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "agent-cockpit"
+    legacy = home / "mcp_agent_mail" / "storage.sqlite3"
+    repo.mkdir(parents=True)
+    legacy.parent.mkdir(parents=True)
+    legacy.touch()
+
+    values = next_profile.dev_layout(home, repo)
+
+    assert values["AGENT_MAIL_DB_PATH"] == str(legacy)
+
+
+def test_dev_profile_prefers_existing_xdg_agent_mail_db(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "agent-cockpit"
+    modern = home / ".local" / "share" / "mcp_agent_mail" / "storage.sqlite3"
+    legacy = home / "mcp_agent_mail" / "storage.sqlite3"
+    repo.mkdir(parents=True)
+    modern.parent.mkdir(parents=True)
+    legacy.parent.mkdir(parents=True)
+    modern.touch()
+    legacy.touch()
+
+    values = next_profile.dev_layout(home, repo)
+
+    assert values["AGENT_MAIL_DB_PATH"] == str(modern)
+
+
 def test_dev_values_does_not_require_home_github(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

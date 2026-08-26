@@ -48,6 +48,14 @@ def dev_layout(home: Path, repo: Path) -> dict[str, str]:
     config = home / ".config" / "agent-cockpit"
     state = home / ".local" / "state" / "agent-cockpit"
     uploads = home / "dashboard-uploads"
+    agent_mail_candidates = (
+        home / ".local" / "share" / "mcp_agent_mail" / "storage.sqlite3",
+        home / "mcp_agent_mail" / "storage.sqlite3",
+    )
+    agent_mail_db = next(
+        (path for path in agent_mail_candidates if path.is_file()),
+        agent_mail_candidates[0],
+    )
     return {
         "COCKPIT_NEXT_WORKTREE": str(repo),
         "COCKPIT_PORT": DEV_PORT,
@@ -67,9 +75,7 @@ def dev_layout(home: Path, repo: Path) -> dict[str, str]:
         "XDG_CONFIG_HOME": str(home / ".config"),
         "XDG_STATE_HOME": str(home / ".local" / "state"),
         "HERDR_CONFIG_PATH": str(home / ".config" / "herdr" / "config.toml"),
-        "AGENT_MAIL_DB_PATH": str(
-            home / ".local" / "share" / "mcp_agent_mail" / "storage.sqlite3"
-        ),
+        "AGENT_MAIL_DB_PATH": str(agent_mail_db),
         "AGENT_MAIL_PROJECT": str(repo),
         "HERDR_SESSION": SESSION,
         "TEAM_HUB_URL": "http://127.0.0.1:8765",
