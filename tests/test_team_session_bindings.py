@@ -923,7 +923,7 @@ def test_failed_replace_restores_previous_project_route(monkeypatch):
     assert remote_calls[-1][3]["rotate_reply_token"] is True
 
 
-def test_unbind_only_removes_route_and_deactivates_managed_lead(monkeypatch):
+def test_unbind_only_removes_legacy_route_without_stopping_session(monkeypatch):
     client, headers = _prepare(monkeypatch)
     calls = []
     monkeypatch.setattr(
@@ -942,7 +942,7 @@ def test_unbind_only_removes_route_and_deactivates_managed_lead(monkeypatch):
         lead={"agent": "codex", "mail_name": "codex-main"},
         client_session_id="client-run-1",
         agent_id=41,
-        managed_runtime=True,
+        managed_runtime=False,
     )
     monkeypatch.setattr(
         server.herdr_client,
@@ -961,6 +961,26 @@ def test_unbind_only_removes_route_and_deactivates_managed_lead(monkeypatch):
         "Bearer human.jwt", {"client_session_id": "client-run-1"},
     )
     assert team_sessions.list_bindings(HUB, 7) == []
+
+
+def test_managed_topic_agent_cannot_be_unbound_without_deleting_runtime(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    team_sessions.bind(
+        hub=HUB, human_id=7, project_slug="demo", session="team-demo-1",
+        session_generation="run-1", session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "codex-main"},
+        client_session_id="client-run-1", agent_id=41, managed_runtime=True,
+    )
+
+    response = client.delete(
+        "/api/team-auth/session-bindings/demo", headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert "不能只解除绑定" in response.text
+    assert team_sessions.list_bindings(HUB, 7)[0]["session"] == "team-demo-1"
 
 
 def test_delete_managed_topic_agent_stops_unbinds_then_deletes_runtime(monkeypatch):
@@ -1231,11 +1251,54 @@ def test_one_click_team_session_starts_read_only_before_binding(monkeypatch):
     assert workspace_id == "ws-1"
     assert session_name == "team-demo-1"
     assert managed_team is True
-    assert create_req.args == "--sandbox read-only"
+    assert create_req.args == "--disable hooks --sandbox read-only"
     assert bind_calls[0][0] == "demo"
     assert bind_calls[0][1].session == "team-demo-1"
     assert bind_calls[0][1].reply_mode == "auto"
     assert bind_calls[0][2] is True
+
+
+def test_one_click_replacement_retires_previous_managed_runtime(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    team_sessions.bind(
+        hub=HUB, human_id=7, project_slug="demo", session="team-demo-old",
+        session_generation="old-run", session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "old-lead"},
+        client_session_id="old-client", agent_id=40, managed_runtime=True,
+    )
+    monkeypatch.setattr(server, "_chat_workspace", lambda workspace_id: {
+        "id": workspace_id, "title": "HR Ready", "path": PROJECT_KEY,
+    })
+    monkeypatch.setattr(server, "_next_team_session_name", lambda _slug: "team-demo-new")
+    monkeypatch.setattr(server, "_create_chat_session", lambda *_args, **_kwargs: {
+        "session": "team-demo-new", "thread": {"id": "th-new"},
+        "agent_mail": {"ok": True},
+        "leader": {"leader_mail_name": "new-lead"},
+    })
+    retired = []
+    monkeypatch.setattr(
+        server, "api_team_session_bind",
+        lambda _slug, req, _request: {
+            "ok": True, "binding": {"session": req.session},
+        },
+    )
+    monkeypatch.setattr(
+        server, "_retire_replaced_team_runtime",
+        lambda previous, replacement: retired.append((previous, replacement))
+        or {"deleted": True},
+    )
+
+    response = client.post(
+        "/api/team-auth/session-bindings/demo/create", headers=headers,
+        json={"workspace_id": "ws-1", "agent": "codex", "replace": True},
+    )
+
+    assert response.status_code == 200
+    assert retired[0][0]["session"] == "team-demo-old"
+    assert retired[0][1] == "team-demo-new"
+    assert response.json()["replaced_runtime"] == {"deleted": True}
 
 
 def test_managed_binding_is_not_ready_when_real_process_fails_fence(monkeypatch):

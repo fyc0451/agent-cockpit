@@ -763,6 +763,7 @@ def test_team_sessions_real_binding_shape(isolated_roots):
     path = runtime_paths.store("team_sessions")
     path.write_text(json.dumps({
         "version": 1,
+        "managed_sessions": ["team-p-1"],
         "bindings": [{
             "hub": "http://h",
             "human_id": 1,
@@ -785,6 +786,22 @@ def test_team_sessions_real_binding_shape(isolated_roots):
     }), encoding="utf-8")
     r = store_schema._check_versioned_json("team_sessions")
     assert r["reason"] == store_schema.REASON_COMPATIBLE
+
+
+@pytest.mark.parametrize("managed", [["bad name"], ["team-p-1", "team-p-1"]])
+def test_team_sessions_rejects_invalid_managed_session_registry(
+    isolated_roots, managed,
+):
+    path = runtime_paths.store("team_sessions")
+    path.write_text(json.dumps({
+        "version": 1,
+        "managed_sessions": managed,
+        "bindings": [],
+    }), encoding="utf-8")
+
+    assert store_schema._check_versioned_json("team_sessions")["reason"] == (
+        store_schema.REASON_FINGERPRINT_MISMATCH
+    )
 
 
 def test_team_sessions_rejects_invalid_reply_mode(isolated_roots):

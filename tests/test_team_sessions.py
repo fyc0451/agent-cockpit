@@ -42,7 +42,9 @@ def test_bind_persists_minimal_private_state(tmp_path, monkeypatch):
     assert state.stat().st_mode & 0o777 == 0o600
     raw = state.read_text(encoding="utf-8")
     assert "registration_token" not in raw
-    assert json.loads(raw)["bindings"][0]["lead"]["mail_name"] == "codex-main"
+    parsed = json.loads(raw)
+    assert parsed["bindings"][0]["lead"]["mail_name"] == "codex-main"
+    assert parsed["managed_sessions"] == ["workspace-a"]
 
 
 def test_managed_session_matches_exact_bound_generation(tmp_path, monkeypatch):
@@ -77,7 +79,24 @@ def test_managed_binding_lookup_only_returns_current_managed_runtime(
 
     team_sessions.unbind_project("http://team.example", 7, "alpha")
     assert team_sessions.managed_binding_for_session("workspace-a") is None
+    assert team_sessions.managed_session_names() == {"workspace-a"}
+    assert team_sessions.forget_managed_session("workspace-a") is True
+    assert team_sessions.forget_managed_session("workspace-a") is False
     assert team_sessions.managed_session_names() == set()
+
+
+def test_legacy_state_infers_current_managed_session(tmp_path, monkeypatch):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "version": 1,
+        "bindings": [{
+            "session": "team-alpha-1",
+            "managed_runtime": True,
+        }],
+    }), encoding="utf-8")
+    monkeypatch.setattr(team_sessions, "STATE_PATH", state)
+
+    assert team_sessions.managed_session_names() == {"team-alpha-1"}
 
 
 def test_managed_sender_requires_exact_generation_name_and_project(

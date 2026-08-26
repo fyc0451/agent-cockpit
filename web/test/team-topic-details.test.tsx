@@ -156,6 +156,53 @@ describe('团队话题成员详情', () => {
     }))
   })
 
+  it('多个工作区时必须明确选择，切换 Topic 后不会沿用旧目录', async () => {
+    const onTeamCreateSession = vi.fn().mockResolvedValue(undefined)
+    const { rerender } = render(
+      <AppFrame sidebar={null}>
+        <DetailsPanel
+          tab="members" onTabChange={vi.fn()} members={[]} session={null}
+          workdir={null} onMention={vi.fn()} onFilter={vi.fn()}
+          onInteract={vi.fn()} onOpenTerminal={vi.fn()}
+          onMembersChanged={vi.fn()} fileRoot={null} onPreview={vi.fn()}
+          teamTopic="ready" teamMembers={[]}
+          teamWorkspaces={[
+            { id: 'ws-cockpit', label: 'agent-cockpit' },
+            { id: 'ws-ready', label: 'hr-ready' },
+          ]}
+          teamAvailableAgents={['codex']}
+          onTeamCreateSession={onTeamCreateSession}
+        />
+      </AppFrame>,
+    )
+    const user = userEvent.setup()
+    await user.click(screen.getByText('我的 Topic Agent'))
+    const workspace = screen.getByLabelText('Topic Agent 工作区')
+    expect(workspace).toHaveValue('')
+    expect(screen.getByRole('button', { name: '创建 Topic Agent' })).toBeDisabled()
+    await user.selectOptions(workspace, 'ws-ready')
+    expect(workspace).toHaveValue('ws-ready')
+
+    rerender(
+      <AppFrame sidebar={null}>
+        <DetailsPanel
+          tab="members" onTabChange={vi.fn()} members={[]} session={null}
+          workdir={null} onMention={vi.fn()} onFilter={vi.fn()}
+          onInteract={vi.fn()} onOpenTerminal={vi.fn()}
+          onMembersChanged={vi.fn()} fileRoot={null} onPreview={vi.fn()}
+          teamTopic="other" teamMembers={[]}
+          teamWorkspaces={[
+            { id: 'ws-cockpit', label: 'agent-cockpit' },
+            { id: 'ws-ready', label: 'hr-ready' },
+          ]}
+          teamAvailableAgents={['codex']}
+          onTeamCreateSession={onTeamCreateSession}
+        />
+      </AppFrame>,
+    )
+    expect(screen.getByLabelText('Topic Agent 工作区')).toHaveValue('')
+  })
+
   it('Topic Agent 展示上下文新鲜度、SHA 与 handoff 时间', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-25T10:20:35+00:00'))

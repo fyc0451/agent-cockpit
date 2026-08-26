@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -14,13 +15,14 @@ from . import runtime_paths
 
 STATE_PATH = runtime_paths.store("team_sessions")
 _lock = threading.RLock()
+_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 def _load() -> dict[str, Any]:
     try:
         raw = STATE_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return {"version": 1, "bindings": []}
+        return {"version": 1, "bindings": [], "managed_sessions": []}
     except (OSError, UnicodeError) as exc:
         raise OSError("Team Session 绑定状态不可读") from exc
     try:
@@ -30,7 +32,28 @@ def _load() -> dict[str, Any]:
     bindings = data.get("bindings") if isinstance(data, dict) else None
     if not isinstance(bindings, list):
         raise OSError("Team Session 绑定状态格式无效")
-    return {"version": 1, "bindings": [row for row in bindings if isinstance(row, dict)]}
+    rows = [row for row in bindings if isinstance(row, dict)]
+    raw_managed = data.get("managed_sessions", [])
+    if (
+        not isinstance(raw_managed, list)
+        or any(
+            not isinstance(name, str) or _SESSION_NAME_RE.fullmatch(name) is None
+            for name in raw_managed
+        )
+        or len(set(raw_managed)) != len(raw_managed)
+    ):
+        raise OSError("Team Session 绑定状态格式无效")
+    managed = set(raw_managed)
+    managed.update(
+        str(row.get("session"))
+        for row in rows
+        if row.get("managed_runtime") is True and row.get("session")
+    )
+    return {
+        "version": 1,
+        "bindings": rows,
+        "managed_sessions": sorted(managed),
+    }
 
 
 def _write(data: dict[str, Any]) -> None:
@@ -97,14 +120,26 @@ def managed_binding_for_session(session: str) -> dict[str, Any] | None:
 
 
 def managed_session_names() -> set[str]:
-    """返回当前绑定的 Team 专用 Session 名，供普通会话 read-model 隔离。"""
+    """返回全部 Team 专用 Session 名，包括等待删除的已替换 runtime。"""
     with _lock:
-        rows = _load()["bindings"]
-    return {
-        str(row.get("session"))
-        for row in rows
-        if row.get("managed_runtime") is True and row.get("session")
-    }
+        names = _load()["managed_sessions"]
+    return set(names)
+
+
+def forget_managed_session(session: str) -> bool:
+    """仅在真实 Session 已删除后移除 read-model 隔离 tombstone。"""
+    name = str(session).strip()
+    if _SESSION_NAME_RE.fullmatch(name) is None:
+        raise ValueError("Session 名称无效")
+    with _lock:
+        data = _load()
+        current = set(data["managed_sessions"])
+        if name not in current:
+            return False
+        current.remove(name)
+        data["managed_sessions"] = sorted(current)
+        _write(data)
+    return True
 
 
 def managed_binding_for_sender(
@@ -305,6 +340,10 @@ def bind(
             )
         ]
         data["bindings"].append(entry)
+        if managed_runtime:
+            data["managed_sessions"] = sorted({
+                *data["managed_sessions"], session,
+            })
         _write(data)
     return dict(entry)
 

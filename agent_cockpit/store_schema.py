@@ -1070,6 +1070,9 @@ _JSON_SHAPES: dict[str, frozenset[str]] = {
         "version", "work_items", "consult_requests", "reply_evidence",
     }),
 }
+_JSON_OPTIONAL_SHAPES: dict[str, frozenset[str]] = {
+    "team_sessions": frozenset({"managed_sessions"}),
+}
 
 
 def _check_versioned_json(
@@ -1099,10 +1102,11 @@ def _check_versioned_json(
     if ver < expected_v:
         return _store_result(name, "migration_required", REASON_MIGRATION_REQUIRED)
     allowed = _JSON_SHAPES[name]
+    optional = _JSON_OPTIONAL_SHAPES.get(name, frozenset())
     keys = set(data)
     if not allowed.issubset(keys):
         return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-    if keys - allowed:
+    if keys - allowed - optional:
         return _store_result(name, "future", REASON_UNKNOWN_FIELDS)
     # Core members required + exact member shapes (writer-aligned 0.3.x).
     if name == "mail_projects":
@@ -1162,6 +1166,17 @@ def _check_versioned_json(
             if "handed_to_leader" in entry and type(entry["handed_to_leader"]) is not bool:
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
     elif name == "team_sessions":
+        managed_sessions = data.get("managed_sessions", [])
+        if (
+            not isinstance(managed_sessions, list)
+            or any(
+                not isinstance(session, str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", session) is None
+                for session in managed_sessions
+            )
+            or len(set(managed_sessions)) != len(managed_sessions)
+        ):
+            return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
         bindings = data.get("bindings")
         if not isinstance(bindings, list):
             return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)

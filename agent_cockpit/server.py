@@ -4946,7 +4946,12 @@ def api_team_session_create_and_bind(
 ):
     """以只读参数创建独立 Team Session，并在同一次操作中绑定 Topic。"""
     slug = _team_project_slug(project_slug)
-    authorization, _ = _team_human_context(request)
+    authorization, human = _team_human_context(request)
+    hub = hub_client.public_team_config()["team_hub"]
+    previous = next((
+        row for row in _team_session_bindings_for(hub, int(human["id"]))
+        if row.get("project_slug") == slug
+    ), None)
     try:
         membership = hub_client.human_api(
             "GET",
@@ -5021,6 +5026,7 @@ def api_team_session_create_and_bind(
         }) from exc
     finally:
         request.state.team_managed_runtime = False
+    replaced_runtime = _retire_replaced_team_runtime(previous, session_name)
     return {
         "ok": True,
         "session": session_name,
@@ -5030,6 +5036,10 @@ def api_team_session_create_and_bind(
             "id": workspace["id"],
             "title": workspace["title"],
         },
+        **(
+            {"replaced_runtime": replaced_runtime}
+            if replaced_runtime is not None else {}
+        ),
     }
 
 
@@ -5196,6 +5206,8 @@ def api_team_session_unbind(
             }
         if delete_runtime and current.get("managed_runtime") is not True:
             raise HTTPException(409, "旧绑定使用普通本地会话，只能解除或迁移，不能删除普通会话")
+        if not delete_runtime and current.get("managed_runtime") is True:
+            raise HTTPException(409, "Topic 专用 Agent 不能只解除绑定，请停止并删除 Runtime")
         runtime_session = str(current.get("session") or "")
         if delete_runtime:
             stopped = herdr_client.stop_session(runtime_session)
@@ -8175,13 +8187,13 @@ def _apply_read_only_args(agent: str, args: str) -> str:
     if agent == "codex":
         kept = _without_cli_options(
             tokens,
-            valued={"--sandbox"},
+            valued={"--sandbox", "--disable"},
             flags={
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--dangerously-bypass-hook-trust",
             },
         )
-        kept.extend(["--sandbox", "read-only"])
+        kept.extend(["--disable", "hooks", "--sandbox", "read-only"])
         return shlex.join(kept)
     if agent == "kimi":
         kept = _without_cli_options(
@@ -8898,6 +8910,30 @@ def _rollback_created_team_session(session: str) -> dict[str, Any]:
     if stopped.get("stopped") or stopped.get("already_stopped"):
         deleted = api_herdr_session_delete(session)
     return {"stopped": stopped, "deleted": deleted}
+
+
+def _retire_replaced_team_runtime(
+    previous: dict[str, Any] | None, replacement_session: str,
+) -> dict[str, bool] | None:
+    """新 binding 生效后回收被替换的 managed runtime，不遗留普通会话。"""
+    if previous is None or previous.get("managed_runtime") is not True:
+        return None
+    old_session = str(previous.get("session") or "")
+    if not old_session or old_session == replacement_session:
+        return None
+    try:
+        deleted = api_herdr_session_delete(old_session)
+    except HTTPException as exc:
+        logger.error("被替换的 Topic Runtime 删除失败: %s", exc.detail)
+        return {"deleted": False}
+    ok = bool(
+        deleted.get("available", True) is not False
+        and not deleted.get("error")
+        and deleted.get("deleted") == old_session
+    )
+    if not ok:
+        logger.error("被替换的 Topic Runtime 删除失败")
+    return {"deleted": ok}
 
 
 def _restore_session_members(session: str, workdir: str) -> list[dict[str, Any]]:
@@ -9982,6 +10018,10 @@ def api_herdr_session_delete(name: str):
                 result["thread_removed"] = thread["id"]
         except ValueError:
             pass
+        try:
+            team_sessions.forget_managed_session(name)
+        except (OSError, ValueError):
+            logger.exception("已删除 Team Runtime 的 read-model tombstone 清理失败")
     return result
 
 

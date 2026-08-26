@@ -2025,7 +2025,7 @@ def test_readonly_process_verification_checks_real_argv(monkeypatch):
     monkeypatch.setattr(
         herdr_client, "_run",
         lambda *_args, **_kwargs: _agent_process_info([
-            "/opt/codex", "--sandbox", "read-only",
+            "/opt/codex", "--disable", "hooks", "--sandbox", "read-only",
         ]),
     )
     assert herdr_client.readonly_agent_process_verified(
@@ -2038,7 +2038,7 @@ def test_readonly_process_verification_rejects_provider_bypass(monkeypatch):
         herdr_client, "_run",
         lambda *_args, **_kwargs: _agent_process_info([
             "/opt/codex", "--dangerously-bypass-approvals-and-sandbox",
-            "--sandbox", "read-only",
+            "--disable", "hooks", "--sandbox", "read-only",
         ]),
     )
     assert herdr_client.readonly_agent_process_verified(
@@ -2050,7 +2050,7 @@ def test_team_readonly_restart_keeps_atomic_launcher(monkeypatch) -> None:
     instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
     herdr_client.save_launch_descriptor(
         session="demo", pane_id="w1:p5", name=instance_id, kind="codex",
-        args=["--sandbox", "read-only"], agent="codex",
+        args=["--disable", "hooks", "--sandbox", "read-only"], agent="codex",
         workdir="/tmp/project", instance_id=instance_id,
         display_name="codex", launch_mode="team_readonly",
     )
@@ -3903,15 +3903,19 @@ def test_team_readonly_start_uses_atomic_pane_run_without_provider(
     run_calls = [call for call in calls if call[2:4] == ["pane", "run"]]
     assert len(run_calls) == 1
     command = shlex.split(run_calls[0][-1])
-    assert command[:3] == ["/bin/sh", "--sandbox", "read-only"]
-    assert command[3] == "-c"
-    assert "trust_level=\"trusted\"" in command[4]
+    assert command[:5] == [
+        "/bin/sh", "--disable", "hooks", "--sandbox", "read-only",
+    ]
+    assert command[5] == "-c"
+    assert "trust_level=\"trusted\"" in command[6]
     assert not [call for call in calls if call[2:4] == ["agent", "start"]]
     descriptor = herdr_client.get_launch_descriptor_by_instance(
         _CODEXHOME_INSTANCE,
     )
     assert descriptor is not None
-    assert descriptor["args"] == ["--sandbox", "read-only"]
+    assert descriptor["args"] == [
+        "--disable", "hooks", "--sandbox", "read-only",
+    ]
     assert descriptor["launch_mode"] == "team_readonly"
 
 
@@ -3929,7 +3933,7 @@ def test_team_readonly_entry_does_not_accept_caller_args(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("agent", "required"),
     [
-        ("codex", ["--sandbox", "read-only"]),
+        ("codex", ["--disable", "hooks", "--sandbox", "read-only"]),
         ("kimi", ["--plan"]),
         ("claude", ["--permission-mode", "plan"]),
         ("grok", ["--permission-mode", "plan"]),

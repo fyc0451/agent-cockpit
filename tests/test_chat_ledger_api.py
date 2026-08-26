@@ -4729,19 +4729,20 @@ def test_set_leader_switches_records_event_and_notifies(isolated_ledger, monkeyp
 
 
 def test_apply_read_only_args_tightens_launch_flags():
-    # codex：补只读沙箱，已有 --sandbox 一律覆盖为 read-only
-    assert server._apply_read_only_args("codex", "-m gpt-5") == "-m gpt-5 --sandbox read-only"
+    # codex：禁用用户 hooks 并补只读沙箱，已有相关选项一律覆盖。
+    suffix = "--disable hooks --sandbox read-only"
+    assert server._apply_read_only_args("codex", "-m gpt-5") == f"-m gpt-5 {suffix}"
     assert (
         server._apply_read_only_args("codex", "-m gpt-5 --sandbox workspace-write")
-        == "-m gpt-5 --sandbox read-only"
+        == f"-m gpt-5 {suffix}"
     )
     assert (
         server._apply_read_only_args("codex", "-m gpt-5 --sandbox=read-only")
-        == "-m gpt-5 --sandbox read-only"
+        == f"-m gpt-5 {suffix}"
     )
     assert (
         server._apply_read_only_args("codex", "--config 'model_reasoning_effort=high'")
-        == "--config model_reasoning_effort=high --sandbox read-only"
+        == f"--config model_reasoning_effort=high {suffix}"
     )
     assert "dangerously" not in server._apply_read_only_args(
         "codex", "--dangerously-bypass-approvals-and-sandbox",

@@ -2134,7 +2134,9 @@ def _workspace_launch_label(instance_id: str) -> str:
 
 _WORKSPACE_CODEX_READONLY_PUBLIC_ARGS = ["--sandbox", "read-only"]
 _TEAM_READONLY_PUBLIC_ARGS = {
-    "codex": ["--sandbox", "read-only"],
+    # Team Runtime 不加载用户 hooks：身份由 Cockpit 在启动后显式注册，避免
+    # 新会话卡在 Hook Trust 页面，也不允许远端正文触发用户自定义 hook。
+    "codex": ["--disable", "hooks", "--sandbox", "read-only"],
     "kimi": ["--plan"],
     "claude": ["--permission-mode", "plan"],
     "grok": ["--permission-mode", "plan"],
@@ -4417,6 +4419,13 @@ def readonly_agent_process_verified(
             if any(token.startswith("--dangerously-") for token in argv):
                 return False
             if kind == "codex":
+                disabled = [
+                    i for i, token in enumerate(argv)
+                    if token == "--disable" and i + 1 < len(argv)
+                    and argv[i + 1] == "hooks"
+                ]
+                if len(disabled) != 1:
+                    return False
                 positions = [i for i, token in enumerate(argv) if token == "--sandbox"]
                 if len(positions) != 1 or positions[0] + 1 >= len(argv):
                     return False

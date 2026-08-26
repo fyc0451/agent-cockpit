@@ -146,7 +146,9 @@ export function DetailsPanel({
     () => TEAM_AGENT_KINDS.filter((agent) => teamAvailableAgents.includes(agent)),
     [teamAvailableAgents],
   )
-  const [teamWorkspaceId, setTeamWorkspaceId] = useState(teamWorkspaces[0]?.id ?? '')
+  const onlyTeamWorkspaceId = teamWorkspaces.length === 1 ? teamWorkspaces[0].id : ''
+  const teamWorkspaceIds = teamWorkspaces.map((workspace) => workspace.id).join('|')
+  const [teamWorkspaceId, setTeamWorkspaceId] = useState(onlyTeamWorkspaceId)
   const [teamAgentKind, setTeamAgentKind] = useState<TeamAgentKind>(selectableTeamAgents[0] ?? 'codex')
   const [teamAgentModel, setTeamAgentModel] = useState('')
   const [teamAgentReplyMode, setTeamAgentReplyMode] = useState<'confirm' | 'auto'>('confirm')
@@ -156,9 +158,13 @@ export function DetailsPanel({
 
   useEffect(() => {
     if (!teamWorkspaces.some((workspace) => workspace.id === teamWorkspaceId)) {
-      setTeamWorkspaceId(teamWorkspaces[0]?.id ?? '')
+      setTeamWorkspaceId(onlyTeamWorkspaceId)
     }
-  }, [teamWorkspaceId, teamWorkspaces])
+  }, [teamWorkspaceId, teamWorkspaceIds, onlyTeamWorkspaceId])
+
+  useEffect(() => {
+    setTeamWorkspaceId(onlyTeamWorkspaceId)
+  }, [teamTopic, onlyTeamWorkspaceId])
 
   useEffect(() => {
     if (!selectableTeamAgents.includes(teamAgentKind)) {
@@ -186,7 +192,7 @@ export function DetailsPanel({
       return
     }
     const replacing = !!teamBinding
-    if (replacing && !window.confirm('将迁移为新的 Topic 专用 Agent；原绑定不再处理团队消息。继续？')) {
+    if (replacing && !window.confirm('将重建 Topic Agent；旧专用 Session 会停止并删除。继续？')) {
       return
     }
     setTeamAgentLoading(true)
@@ -308,6 +314,7 @@ export function DetailsPanel({
                   {onTeamCreateSession && (<>
                     <select aria-label="Topic Agent 工作区" value={teamWorkspaceId} onChange={(event) => setTeamWorkspaceId(event.target.value)} disabled={teamAgentLoading}>
                       {teamWorkspaces.length === 0 && <option value="">没有本地工作区</option>}
+                      {teamWorkspaces.length > 1 && <option value="">请选择 Topic 对应工作区</option>}
                       {teamWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.label}</option>)}
                     </select>
                     <select aria-label="Topic Agent 类型" value={teamAgentKind} onChange={(event) => setTeamAgentKind(event.target.value as TeamAgentKind)} disabled={teamAgentLoading || selectableTeamAgents.length === 0}>
@@ -320,7 +327,7 @@ export function DetailsPanel({
                       <option value="auto">自动回复</option>
                     </select>
                     <button type="button" onClick={() => void createTopicAgent()} disabled={teamAgentLoading || !teamWorkspaceId || selectableTeamAgents.length === 0}>
-                      {teamAgentLoading ? '创建中…' : teamBinding ? '迁移 / 更换 Agent' : '创建 Topic Agent'}
+                      {teamAgentLoading ? '创建中…' : teamBinding ? '重建 Topic Agent' : '创建 Topic Agent'}
                     </button>
                   </>)}
                   {teamAgentError && <div className="gc-modal-error">{teamAgentError}</div>}
