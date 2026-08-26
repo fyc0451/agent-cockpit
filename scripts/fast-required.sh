@@ -43,6 +43,7 @@ unset COCKPIT_NEXT_PROFILE
   tests/test_persist_work.py \
   tests/test_next_dev_profile.py \
   tests/test_workspace_write_gate.py \
+  tests/test_store_schema.py \
   tests/test_release_files.py \
   tests/test_upgrade_retired.py \
   tests/test_upgrade_script.py

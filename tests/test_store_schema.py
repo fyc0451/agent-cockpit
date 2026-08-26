@@ -270,6 +270,35 @@ def test_workspace_work_current_store_fingerprint_compatible(isolated_roots):
     }["workspace_work"]["reason"] == store_schema.REASON_COMPATIBLE
 
 
+def test_workspace_work_migration_history_is_compatible(isolated_roots):
+    from agent_cockpit import workspace_work_store
+
+    path = runtime_paths.store("workspace_work")
+    workspace_work_store.initialize(path).close()
+    connection = sqlite3.connect(path)
+    connection.executemany(
+        "INSERT INTO schema_migrations VALUES (?,?,?,?)",
+        [
+            (
+                workspace_work_store.V1_MIGRATION_ID,
+                workspace_work_store.V1_SCHEMA_VERSION,
+                workspace_work_store.V1_SCHEMA_DIGEST,
+                "2026-08-01T00:00:00Z",
+            ),
+            (
+                workspace_work_store.V2_MIGRATION_ID,
+                workspace_work_store.V2_SCHEMA_VERSION,
+                workspace_work_store.V2_SCHEMA_DIGEST,
+                "2026-08-02T00:00:00Z",
+            ),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    assert _workspace_work_check()["reason"] == store_schema.REASON_COMPATIBLE
+
+
 def test_workspace_work_future_and_corrupt_are_pure_read_fail_closed(isolated_roots):
     path = runtime_paths.store("workspace_work")
     connection = sqlite3.connect(path)
@@ -328,6 +357,27 @@ def test_workspace_execution_current_store_fingerprint_compatible(isolated_roots
     assert {
         row["name"]: row for row in store_schema.probe_all_stores()
     }["workspace_execution"]["reason"] == store_schema.REASON_COMPATIBLE
+
+
+def test_workspace_execution_migration_history_is_compatible(isolated_roots):
+    from agent_cockpit import workspace_execution_store
+
+    path = runtime_paths.store("workspace_execution")
+    workspace_execution_store.initialize(path).close()
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT INTO schema_migrations VALUES (?,?,?,?)",
+        (
+            workspace_execution_store.V1_MIGRATION_ID,
+            workspace_execution_store.V1_SCHEMA_VERSION,
+            workspace_execution_store.V1_SCHEMA_DIGEST,
+            "2026-08-01T00:00:00Z",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    assert _workspace_execution_check()["reason"] == store_schema.REASON_COMPATIBLE
 
 
 def test_workspace_execution_future_and_corrupt_are_pure_read_fail_closed(

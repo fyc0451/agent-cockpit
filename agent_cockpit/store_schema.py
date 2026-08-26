@@ -752,8 +752,24 @@ def _check_sqlite(
                 ).fetchall()
             except sqlite3.Error:
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-            if [tuple(row) for row in receipts] != [expected_migration]:
+            current_receipts = [
+                tuple(row) for row in receipts
+                if row[0] == expected_migration[0]
+            ]
+            if current_receipts != [expected_migration]:
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
+        try:
+            check = con.execute("PRAGMA quick_check").fetchone()
+            if not check or str(check[0]).lower() != "ok":
+                return _store_result(name, "error", REASON_CORRUPT)
+        except sqlite3.Error:
+            return _store_result(name, "error", REASON_CORRUPT)
+        # An exact sqlite_master fingerprint is stronger than the duplicated
+        # table/index/FK maps below and follows the versioned stores' own
+        # open_existing contract.  Do not let those secondary maps drift and
+        # reject a valid append-only migration history.
+        if expected_schema_statements is not None:
+            return _store_result(name, "compatible", REASON_COMPATIBLE)
         # Discover tables (exclude sqlite_*)
         names = {
             str(r[0])
@@ -804,12 +820,6 @@ def _check_sqlite(
                 if exp_fks[table].issubset(act_fk) and act_fk - exp_fks[table]:
                     return _store_result(name, "future", REASON_FUTURE_SCHEMA)
                 return _store_result(name, "error", REASON_FINGERPRINT_MISMATCH)
-        try:
-            check = con.execute("PRAGMA quick_check").fetchone()
-            if not check or str(check[0]).lower() != "ok":
-                return _store_result(name, "error", REASON_CORRUPT)
-        except sqlite3.Error:
-            return _store_result(name, "error", REASON_CORRUPT)
         return _store_result(name, "compatible", REASON_COMPATIBLE)
     finally:
         con.close()
