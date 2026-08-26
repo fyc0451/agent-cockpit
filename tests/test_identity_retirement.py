@@ -179,6 +179,28 @@ def test_retry_fails_closed_when_herdr_snapshot_unavailable(monkeypatch, tmp_pat
     assert result["errors"] == {INSTANCE_ID: "offline"}
 
 
+def test_retry_does_not_confuse_reused_pane_with_old_instance(monkeypatch, tmp_path):
+    _pending_descriptor(monkeypatch, tmp_path)
+    replacement = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
+    monkeypatch.setattr(server, "_registry_scan", lambda: [])
+    monkeypatch.setattr(
+        server.herdr_client, "snapshot",
+        lambda: {
+            "available": True,
+            "sessions": [{
+                "session": "demo",
+                "agents": [{"name": replacement, "pane_id": "w1:p2"}],
+            }],
+        },
+    )
+    monkeypatch.setattr(server.team_sessions, "references_instance", lambda _id: False)
+
+    result = server._retry_pending_agent_retirements()
+
+    assert result["orphaned"] == [INSTANCE_ID]
+    assert result["pending"] == []
+
+
 def test_retire_team_codex_removes_scoped_exec_rule_before_finalize(
     monkeypatch, tmp_path,
 ):

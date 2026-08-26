@@ -9843,10 +9843,10 @@ def _retry_pending_agent_retirements() -> dict[str, Any]:
             try:
                 live_instances.add(herdr_client.validate_agent_instance_id(name))
             except ValueError:
-                pass
-            pane_id = str(agent.get("pane_id") or "")
-            if session_name and pane_id:
-                live_locations.add((session_name, pane_id))
+                # 旧/受限快照可能没有 runtime name，此时才用位置保守兜底。
+                pane_id = str(agent.get("pane_id") or "")
+                if session_name and pane_id:
+                    live_locations.add((session_name, pane_id))
 
     registry_by_instance: dict[str, list[dict[str, Any]]] = {}
     for identity in _registry_scan():
