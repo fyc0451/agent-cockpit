@@ -67,7 +67,9 @@ def dev_layout(home: Path, repo: Path) -> dict[str, str]:
         "XDG_CONFIG_HOME": str(home / ".config"),
         "XDG_STATE_HOME": str(home / ".local" / "state"),
         "HERDR_CONFIG_PATH": str(home / ".config" / "herdr" / "config.toml"),
-        "AGENT_MAIL_DB_PATH": str(home / "mcp_agent_mail" / "storage.sqlite3"),
+        "AGENT_MAIL_DB_PATH": str(
+            home / ".local" / "share" / "mcp_agent_mail" / "storage.sqlite3"
+        ),
         "AGENT_MAIL_PROJECT": str(repo),
         "HERDR_SESSION": SESSION,
         "TEAM_HUB_URL": "http://127.0.0.1:8765",

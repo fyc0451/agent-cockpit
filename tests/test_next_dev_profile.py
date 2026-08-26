@@ -97,6 +97,9 @@ def test_dev_profile_accepts_this_checkout_on_8790(tmp_path: Path, monkeypatch: 
     assert next_profile.enabled(env)
     assert next_profile.is_dev(env)
     assert not next_profile.is_ephemeral(env)
+    assert env["AGENT_MAIL_DB_PATH"] == str(
+        home / ".local" / "share" / "mcp_agent_mail" / "storage.sqlite3"
+    )
     assert next_profile.project(env) == str(repo)
     assert next_profile.session(env) is None
     assert next_profile.require_session("any-session", env) == "any-session"
