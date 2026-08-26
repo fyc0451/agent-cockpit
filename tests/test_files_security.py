@@ -563,6 +563,30 @@ def test_search_files_recursively_by_name(tmp_path):
     }
 
 
+def test_search_large_tree_finds_exact_path_and_late_exact_filename(tmp_path, monkeypatch):
+    root = _mkdirs(tmp_path / "large-tree")
+    early = _mkdirs(root / "a-history")
+    late = _mkdirs(root / "z-current")
+    for index in range(5):
+        (early / f"old-{index}.json").write_text("{}")
+    target = late / "app97-v3490-fixed-full.json"
+    target.write_text("{}")
+    monkeypatch.setattr(files, "MAX_SEARCH_ENTRIES", 3)
+    monkeypatch.setattr(files, "MAX_EXACT_SEARCH_ENTRIES", 50)
+
+    direct = files.search_under_root(root, "z-current/app97-v3490-fixed-full.json")
+    assert [row["path"] for row in direct["results"]] == [str(target)]
+    assert direct["truncated"] is False
+
+    exact_name = files.search_under_root(root, "app97-v3490-fixed-full.json")
+    assert [row["path"] for row in exact_name["results"]] == [str(target)]
+    assert exact_name["truncated"] is True
+
+    partial = files.search_under_root(root, "v3490-fixed")
+    assert partial["results"] == []
+    assert partial["truncated"] is True
+
+
 def test_search_files_respects_limits_and_skips_internal_dirs(tmp_path):
     root = _mkdirs(tmp_path / "dashboard-data")
     for name in ("match-a.txt", "match-b.txt", "match-c.txt"):

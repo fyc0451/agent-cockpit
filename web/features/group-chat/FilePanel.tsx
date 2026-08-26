@@ -224,6 +224,7 @@ export function FilePanel({ session, root, open, embedded, onPreview, onClose }:
   const [tree, setTree] = useState<TreeState>({ expanded: {}, children: {}, loading: {} })
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[] | null>(null)
+  const [searchTruncated, setSearchTruncated] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const inbox = inboxPath(root)
 
@@ -253,12 +254,19 @@ export function FilePanel({ session, root, open, embedded, onPreview, onClose }:
     const q = query.trim()
     if (!q) {
       setResults(null)
+      setSearchTruncated(false)
       return
     }
     const timer = window.setTimeout(() => {
       searchSessionFiles(session, q)
-        .then(setResults)
-        .catch(() => setResults([]))
+        .then((result) => {
+          setResults(result.results)
+          setSearchTruncated(result.truncated)
+        })
+        .catch(() => {
+          setResults([])
+          setSearchTruncated(false)
+        })
     }, 300)
     return () => window.clearTimeout(timer)
   }, [query, session])
@@ -320,6 +328,11 @@ export function FilePanel({ session, root, open, embedded, onPreview, onClose }:
 
       {results ? (
         <div className="gc-files-tree">
+          {searchTruncated && (
+            <div className="gc-side-empty" role="status">
+              搜索范围较大，结果已截断；输入完整文件名或相对路径可精确查找。
+            </div>
+          )}
           {results.length === 0 && <div className="gc-side-empty">没有匹配的文件</div>}
           {results.map((r) => (
             <div key={r.path} className="gc-tree-row">

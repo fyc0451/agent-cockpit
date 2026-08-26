@@ -139,13 +139,16 @@ export async function fetchSessionGit(
   }
 }
 
-export async function searchSessionFiles(session: string, q: string): Promise<SearchResult[]> {
+export async function searchSessionFiles(
+  session: string,
+  q: string,
+): Promise<{ results: SearchResult[]; truncated: boolean }> {
   const raw = await legacyGet(
     `/api/chat/sessions/${encodeURIComponent(session)}/files/search?q=${encodeURIComponent(q)}`,
   )
   if (!isObj(raw)) fail('search')
   const rows = Array.isArray(raw.results) ? raw.results : Array.isArray(raw.matches) ? raw.matches : []
-  return rows.flatMap((r) => {
+  const results = rows.flatMap((r) => {
     if (!isObj(r)) return []
     const p = typeof r.path === 'string' ? r.path : ''
     if (!p) return []
@@ -158,6 +161,7 @@ export async function searchSessionFiles(session: string, q: string): Promise<Se
       },
     ]
   })
+  return { results, truncated: raw.truncated === true }
 }
 
 export function sessionFileDownloadUrl(session: string, path: string): string {

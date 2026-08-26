@@ -30,6 +30,7 @@ from . import next_profile, runtime_paths
 MAX_EDIT_SIZE = 2 * 1024 * 1024  # 2MB
 MAX_SEARCH_RESULTS = 200
 MAX_SEARCH_ENTRIES = 20_000
+MAX_EXACT_SEARCH_ENTRIES = 200_000
 SEARCH_SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__"}
 # 文本编辑白名单后缀(二进制不开放编辑,只读可放宽)
 TEXT_EXT = {
@@ -723,6 +724,52 @@ def _search_name_or_path(name: str, relative: str, needle: str, prefix: bool) ->
     return needle in name.casefold() or needle in rel
 
 
+def _search_result(item: Path, relative: str, kind: str) -> dict[str, Any] | None:
+    try:
+        if kind == "dir":
+            if not item.is_dir():
+                return None
+            size = 0
+            modifiable = False
+        else:
+            if not item.is_file():
+                return None
+            st = item.stat()
+            size = st.st_size
+            modifiable = _is_text(item) and size <= MAX_EDIT_SIZE
+    except OSError:
+        return None
+    return {
+        "name": item.name,
+        "path": str(item),
+        "relative": relative,
+        "type": kind,
+        "size": size,
+        "modifiable": modifiable,
+        "ext": item.suffix.lower().lstrip("."),
+    }
+
+
+def _direct_path_search(root: Path, query: str, prefix: bool) -> dict[str, Any] | None:
+    """Exact relative/absolute paths bypass the recursive scan budget."""
+    if prefix:
+        return None
+    raw = query.replace("\\", "/").strip()
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / raw.strip("/")
+    try:
+        item = candidate.resolve(strict=True)
+        relative_path = item.relative_to(root.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if item.is_symlink() or any(part in SEARCH_SKIP_DIRS for part in relative_path.parts):
+        return None
+    relative = relative_path.as_posix()
+    kind = "dir" if item.is_dir() else "file"
+    return _search_result(item, relative, kind)
+
+
 def search_files(rel: str, query: str, limit: int = 100) -> dict[str, Any]:
     """在白名单目录内递归按文件名或相对路径搜索文件和目录。"""
     return _search_files_path(_resolve(rel), query, limit)
@@ -812,10 +859,19 @@ def _search_files_path(root: Path, query: str, limit: int = 100) -> dict[str, An
         raise ValueError(f"搜索范围不是目录: {root}")
 
     needle, prefix = _normalize_search_query(query)
+    direct = _direct_path_search(root, query, prefix)
+    if direct is not None:
+        return {
+            "path": str(root),
+            "query": query,
+            "results": [direct],
+            "truncated": False,
+        }
     results: list[dict[str, Any]] = []
     scanned = 0
     truncated = False
     stop = False
+    exact_name_scan = "/" not in needle and not prefix
 
     for current, dirs, names in os.walk(root, topdown=True, followlinks=False):
         current_path = Path(current)
@@ -838,34 +894,18 @@ def _search_files_path(root: Path, query: str, limit: int = 100) -> dict[str, An
             scanned += 1
             if scanned > MAX_SEARCH_ENTRIES:
                 truncated = True
-                stop = True
-                break
+                if not exact_name_scan or scanned > MAX_EXACT_SEARCH_ENTRIES:
+                    stop = True
+                    break
+                if name.casefold() != needle:
+                    continue
             relative = str(item.relative_to(root)).replace("\\", "/")
             if not _search_name_or_path(name, relative, needle, prefix):
                 continue
-            try:
-                if kind == "dir":
-                    if not item.is_dir():
-                        continue
-                    size = 0
-                    modifiable = False
-                else:
-                    if not item.is_file():
-                        continue
-                    st = item.stat()
-                    size = st.st_size
-                    modifiable = _is_text(item) and size <= MAX_EDIT_SIZE
-            except OSError:
+            result = _search_result(item, relative, kind)
+            if result is None:
                 continue
-            results.append({
-                "name": name,
-                "path": str(item),
-                "relative": relative,
-                "type": kind,
-                "size": size,
-                "modifiable": modifiable,
-                "ext": item.suffix.lower().lstrip("."),
-            })
+            results.append(result)
             if len(results) > limit:
                 results.pop()
                 truncated = True

@@ -154,6 +154,28 @@ describe('FilePanel 群聊附件入口', () => {
     expect(await screen.findByText(/\+world/)).toBeInTheDocument()
     expect(git).toHaveBeenCalledWith('cockpit', { diff: true })
   })
+
+  it('大目录搜索被截断时提示输入完整文件名或相对路径', async () => {
+    search.mockResolvedValue({ results: [], truncated: true })
+    render(
+      <FilePanel
+        session="cockpit"
+        root="/repo"
+        open
+        onPreview={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('搜索文件名或目录…'), {
+      target: { value: 'v3490-fixed' },
+    })
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      '搜索范围较大，结果已截断；输入完整文件名或相对路径可精确查找。',
+    )
+    expect(screen.getByText('没有匹配的文件')).toBeInTheDocument()
+  })
 })
 
 describe('FilePreview 截图', () => {
