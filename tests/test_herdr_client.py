@@ -3979,6 +3979,9 @@ def test_team_codex_exec_rule_is_instance_and_project_scoped(
         str(tool), "--agent", "codex", "--instance", _CODEXHOME_INSTANCE,
         "--project", str(project.resolve()),
     ]
+    assert shlex.split(herdr_client.team_codex_work_command(
+        _CODEXHOME_INSTANCE, str(project),
+    )) == expected_pattern
     assert f"pattern = {json.dumps(expected_pattern, ensure_ascii=False)}" in contents
     assert 'decision = "allow"' in contents
     assert "--ask-for-approval" not in contents

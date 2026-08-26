@@ -2190,6 +2190,26 @@ def _team_work_tool_path() -> Path:
     return tool
 
 
+def _team_codex_work_command_parts(instance_id: str, project: str) -> list[str]:
+    """返回与实例级 execpolicy 完全相同的受限本机命令前缀。"""
+    opaque_id = validate_agent_instance_id(instance_id)
+    project_path = Path(project).expanduser()
+    if not project_path.is_absolute():
+        raise ValueError("Team work project must be absolute")
+    project_path = project_path.resolve()
+    if not project_path.is_dir():
+        raise ValueError("Team work project unavailable")
+    return [
+        str(_team_work_tool_path()), "--agent", "codex",
+        "--instance", opaque_id, "--project", str(project_path),
+    ]
+
+
+def team_codex_work_command(instance_id: str, project: str) -> str:
+    """给受控 pane 的固定命令；只能访问该身份的本机 Team 工作队列。"""
+    return shlex.join(_team_codex_work_command_parts(instance_id, project))
+
+
 def _team_codex_exec_rule_path(instance_id: str) -> Path:
     opaque_id = validate_agent_instance_id(instance_id)
     return (
@@ -2201,17 +2221,7 @@ def _team_codex_exec_rule_path(instance_id: str) -> Path:
 
 def _team_codex_exec_rule_contents(instance_id: str, project: str) -> str:
     """只放行固定 Team 身份读取/回复其受限工作项的本机命令。"""
-    opaque_id = validate_agent_instance_id(instance_id)
-    project_path = Path(project).expanduser()
-    if not project_path.is_absolute():
-        raise ValueError("Team work project must be absolute")
-    project_path = project_path.resolve()
-    if not project_path.is_dir():
-        raise ValueError("Team work project unavailable")
-    pattern = [
-        str(_team_work_tool_path()), "--agent", "codex",
-        "--instance", opaque_id, "--project", str(project_path),
-    ]
+    pattern = _team_codex_work_command_parts(instance_id, project)
     command = shlex.join(pattern)
     return "\n".join([
         "# Managed by Agent Cockpit. Do not edit.",

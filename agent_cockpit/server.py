@@ -5363,11 +5363,21 @@ def _team_lead_worker_tick() -> None:
             except Exception:
                 logger.exception("Team Lead 状态心跳失败")
             try:
+                team_work_command = None
+                if (
+                    binding.get("managed_runtime") is True
+                    and str(lead.get("agent") or "").lower() == "codex"
+                ):
+                    team_work_command = herdr_client.team_codex_work_command(
+                        str(binding.get("session_generation") or ""),
+                        str(binding.get("mail_project") or ""),
+                    )
                 team_lead_worker.poll_binding(
                     binding,
                     candidate,
                     claim=hub_client.session_lead_claim,
                     notify=_notify_team_lead_work,
+                    team_work_command=team_work_command,
                 )
             except hub_client.HumanAPIError as exc:
                 if exc.status_code not in {403, 409}:

@@ -22,6 +22,11 @@ def _prepare(
         lambda: {"team_hub": HUB, "human_auth": "http://auth.example"},
     )
     monkeypatch.setattr(server.hub_client, "session_lead_status", lambda *_args: {})
+    monkeypatch.setattr(
+        server.herdr_client,
+        "team_codex_work_command",
+        lambda instance_id, project: f"/fixed/team-work {instance_id} {project}",
+    )
     monkeypatch.setattr(server, "_registry_scan", lambda: [{
         "project_key": PROJECT,
         "name": "codex-main",
@@ -612,7 +617,7 @@ def test_worker_tick_wakes_running_done_lead(monkeypatch, reply_mode):
     )
     monkeypatch.setattr(
         server.team_lead_worker, "poll_binding",
-        lambda binding, candidate, **_kwargs: calls.append((binding, candidate)),
+        lambda binding, candidate, **kwargs: calls.append((binding, candidate, kwargs)),
     )
 
     server._team_lead_worker_tick()
@@ -620,6 +625,7 @@ def test_worker_tick_wakes_running_done_lead(monkeypatch, reply_mode):
     assert len(calls) == 1
     assert calls[0][0]["reply_mode"] == reply_mode
     assert calls[0][1]["lead"]["pane_id"] == "done-pane"
+    assert calls[0][2]["team_work_command"] == "/fixed/team-work run-1 /work/demo"
     assert statuses == [("core", {
         "client_session_id": "client-1",
         "reply_token": "reply-secret",
