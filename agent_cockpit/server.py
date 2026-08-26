@@ -9724,6 +9724,14 @@ def _retire_agent_instance(
             or ""
         ).strip()
         project = str(descriptor.get("mail_project") or project_hint or "").strip()
+        if not project or not mail_agent:
+            matches = [
+                identity for identity in _registry_scan()
+                if identity.get("instance") == opaque_id
+            ]
+            if len(matches) == 1:
+                mail_agent = str(matches[0].get("agent") or "").strip()
+                project = str(matches[0].get("project_key") or "").strip()
         if not mail_agent or not project:
             error = "缺少精确的 Mail agent 或 project，保留 pending 等待修复"
             try:
@@ -9806,9 +9814,97 @@ def _retire_pending_agent_instances(
 
 def _retry_pending_agent_retirements() -> dict[str, Any]:
     pending = herdr_client.pending_launch_descriptor_retirements()
-    return _retire_pending_agent_instances([
-        str(item.get("instance_id") or "") for item in pending
-    ])
+    requested = [str(item.get("instance_id") or "") for item in pending]
+    if not requested:
+        return {
+            "requested": [], "retired": [], "orphaned": [], "pending": [],
+            "errors": {}, "complete": True,
+        }
+
+    snap = herdr_client.snapshot()
+    if snap.get("available") is not True:
+        error = str(snap.get("error") or "Herdr snapshot 不可用")
+        return {
+            "requested": requested, "retired": [], "orphaned": [],
+            "pending": requested, "errors": dict.fromkeys(requested, error),
+            "complete": False,
+        }
+
+    live_instances: set[str] = set()
+    live_locations: set[tuple[str, str]] = set()
+    for session in snap.get("sessions", []):
+        if not isinstance(session, dict):
+            continue
+        session_name = str(session.get("session") or "")
+        for agent in session.get("agents", []):
+            if not isinstance(agent, dict):
+                continue
+            name = str(agent.get("name") or "")
+            try:
+                live_instances.add(herdr_client.validate_agent_instance_id(name))
+            except ValueError:
+                pass
+            pane_id = str(agent.get("pane_id") or "")
+            if session_name and pane_id:
+                live_locations.add((session_name, pane_id))
+
+    registry_by_instance: dict[str, list[dict[str, Any]]] = {}
+    for identity in _registry_scan():
+        instance_id = identity.get("instance")
+        if isinstance(instance_id, str):
+            registry_by_instance.setdefault(instance_id, []).append(identity)
+
+    retired: list[str] = []
+    orphaned: list[str] = []
+    still_pending: list[str] = []
+    errors: dict[str, str] = {}
+    descriptors = {
+        str(item.get("instance_id") or ""): item for item in pending
+    }
+    for instance_id in requested:
+        descriptor = descriptors[instance_id]
+        location = (
+            str(descriptor.get("session") or ""),
+            str(descriptor.get("pane_id") or ""),
+        )
+        if (
+            instance_id in live_instances
+            or location in live_locations
+            or team_sessions.references_instance(instance_id)
+        ):
+            still_pending.append(instance_id)
+            errors[instance_id] = "身份仍被 live Herdr 或 Team binding 引用"
+            continue
+        identities = registry_by_instance.get(instance_id, [])
+        if len(identities) > 1:
+            still_pending.append(instance_id)
+            errors[instance_id] = "本机 registry 存在多个同 instance 身份，拒绝猜测"
+            continue
+        if len(identities) == 1:
+            result = _retire_agent_instance(instance_id)
+            if result.get("retired"):
+                retired.append(instance_id)
+            else:
+                still_pending.append(instance_id)
+                errors[instance_id] = str(result.get("error") or "退休失败")
+            continue
+        try:
+            tombstone = herdr_client.finalize_launch_descriptor_retirement_orphaned(
+                instance_id, resolution="registry_identity_absent",
+            )
+        except (OSError, ValueError) as exc:
+            tombstone = None
+            errors[instance_id] = str(exc)
+        if tombstone and tombstone.get("state") == "retirement_orphaned":
+            orphaned.append(instance_id)
+        else:
+            still_pending.append(instance_id)
+            errors.setdefault(instance_id, "孤儿墓碑保存失败")
+    return {
+        "requested": requested, "retired": retired, "orphaned": orphaned,
+        "pending": still_pending, "errors": errors,
+        "complete": not still_pending,
+    }
 
 
 def _attach_identity_retirement(
@@ -12929,6 +13025,7 @@ def main() -> int:
                 log_level=level_name.lower(),
                 log_config=None,
                 access_log=False,
+                timeout_graceful_shutdown=10.0,
             )
             uvicorn.Server(config).run(sockets=[listener])
         finally:
@@ -12942,6 +13039,7 @@ def main() -> int:
             log_level=level_name.lower(),
             log_config=None,
             access_log=False,
+            timeout_graceful_shutdown=10.0,
         )
     return 0
 

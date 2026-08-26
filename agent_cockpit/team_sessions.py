@@ -126,6 +126,36 @@ def managed_session_names() -> set[str]:
     return set(names)
 
 
+def references_instance(instance_id: str) -> bool:
+    """当前 binding/咨询目标是否仍精确引用这个 Agent 代际。"""
+    instance = str(instance_id).strip()
+    if not instance:
+        return False
+    with _lock:
+        rows = _load()["bindings"]
+    for row in rows:
+        lead = row.get("lead") if isinstance(row.get("lead"), dict) else {}
+        if (
+            row.get("session_generation") == instance
+            or lead.get("participant_id") == instance
+        ):
+            return True
+        target = (
+            row.get("consult_target")
+            if isinstance(row.get("consult_target"), dict)
+            else {}
+        )
+        target_lead = (
+            target.get("lead") if isinstance(target.get("lead"), dict) else {}
+        )
+        if (
+            target.get("session_generation") == instance
+            or target_lead.get("participant_id") == instance
+        ):
+            return True
+    return False
+
+
 def forget_managed_session(session: str) -> bool:
     """仅在真实 Session 已删除后移除 read-model 隔离 tombstone。"""
     name = str(session).strip()

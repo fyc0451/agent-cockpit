@@ -59,6 +59,31 @@ def test_managed_session_matches_exact_bound_generation(tmp_path, monkeypatch):
     assert team_sessions.is_managed_session("workspace-a", "run-a") is False
 
 
+def test_references_instance_covers_binding_and_consult_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(team_sessions, "STATE_PATH", tmp_path / "state.json")
+    _bind()
+    team_sessions.set_consult_target(
+        hub="http://team.example",
+        human_id=7,
+        project_slug="alpha",
+        target={
+            "session": "dev-a",
+            "session_generation": "dev-run-a",
+            "mail_project": "/work/a",
+            "lead": {
+                "agent": "codex", "mail_name": "dev-main",
+                "participant_id": "dev-lead",
+            },
+        },
+    )
+
+    assert team_sessions.references_instance("run-a") is True
+    assert team_sessions.references_instance("lead") is True
+    assert team_sessions.references_instance("dev-run-a") is True
+    assert team_sessions.references_instance("dev-lead") is True
+    assert team_sessions.references_instance("missing") is False
+
+
 def test_managed_binding_lookup_only_returns_current_managed_runtime(
     tmp_path, monkeypatch,
 ):

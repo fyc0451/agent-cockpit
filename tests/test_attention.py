@@ -1482,6 +1482,9 @@ def test_start_agent_registers_and_notifies_unique_qoder_identity(
     canonical.mkdir()
     init_script = tmp_path / "am-init-project"
     init_script.touch()
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(server, "AGENT_MAIL_INIT_SCRIPT", init_script)
     monkeypatch.setattr(server.herdr_client, "new_agent_instance_id", lambda: instance_id)
@@ -1622,6 +1625,9 @@ def test_start_agent_binds_duplicate_same_type_to_exact_instance(monkeypatch, tm
     instance_id = "i-bbbbbbbbbbbbbbbbbbbbbbbbbb"
     workdir = tmp_path / "worktree"
     workdir.mkdir()
+    monkeypatch.setenv(
+        "COCKPIT_LAUNCH_DESCRIPTORS_PATH", str(tmp_path / "descriptors.json"),
+    )
     monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
     monkeypatch.setattr(server.herdr_client, "new_agent_instance_id", lambda: instance_id)
     monkeypatch.setattr(

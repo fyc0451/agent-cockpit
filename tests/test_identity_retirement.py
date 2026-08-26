@@ -12,7 +12,7 @@ INSTANCE_ID = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 def _pending_descriptor(
     monkeypatch, tmp_path, *, instance_id=INSTANCE_ID, pane_id="w1:p2",
-    team=False,
+    team=False, populate_mail=True,
 ):
     project = tmp_path / "project"
     project.mkdir(exist_ok=True)
@@ -28,10 +28,11 @@ def _pending_descriptor(
         display_name="夜班",
         launch_mode="team_readonly" if team else None,
     )
-    server.herdr_client.update_launch_descriptor_by_instance(
-        instance_id, mail_agent="codex", mail_instance=instance_id,
-        mail_name="FreshMailbox", mail_project=str(project),
-    )
+    if populate_mail:
+        server.herdr_client.update_launch_descriptor_by_instance(
+            instance_id, mail_agent="codex", mail_instance=instance_id,
+            mail_name="FreshMailbox", mail_project=str(project),
+        )
     server.herdr_client.mark_launch_descriptor_retirement_pending("demo", pane_id)
     return project
 
@@ -70,6 +71,112 @@ def test_retire_agent_instance_calls_exact_mail_identity_and_finalizes(
     )
     assert descriptor["state"] == "retired"
     assert descriptor.get("retirement_error") is None
+
+
+def test_retire_agent_instance_recovers_exact_registry_identity(
+    monkeypatch, tmp_path,
+):
+    project = _pending_descriptor(monkeypatch, tmp_path, populate_mail=False)
+    retire_script = tmp_path / "am-retire"
+    retire_script.touch()
+    monkeypatch.setattr(server, "AM_RETIRE_SCRIPT", retire_script)
+    monkeypatch.setattr(server, "_registry_scan", lambda: [{
+        "instance": INSTANCE_ID,
+        "agent": "codex",
+        "project_key": str(project),
+    }])
+    calls = []
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda args, **kwargs: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, "retired", ""),
+    )
+
+    result = server._retire_agent_instance(INSTANCE_ID)
+
+    assert result == {"instance_id": INSTANCE_ID, "retired": True}
+    assert calls == [[
+        str(retire_script), "--agent", "codex", "--instance", INSTANCE_ID,
+        "--project", str(project),
+    ]]
+    descriptor = server.herdr_client.get_launch_descriptor_by_instance(
+        INSTANCE_ID, include_retired=True,
+    )
+    assert descriptor["mail_agent"] == "codex"
+    assert descriptor["mail_project"] == str(project)
+
+
+def test_retry_marks_unreferenced_missing_registry_identity_orphaned(
+    monkeypatch, tmp_path,
+):
+    _pending_descriptor(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_registry_scan", lambda: [])
+    monkeypatch.setattr(
+        server.herdr_client, "snapshot",
+        lambda: {"available": True, "sessions": []},
+    )
+    monkeypatch.setattr(server.team_sessions, "references_instance", lambda _id: False)
+
+    result = server._retry_pending_agent_retirements()
+
+    assert result == {
+        "requested": [INSTANCE_ID], "retired": [],
+        "orphaned": [INSTANCE_ID], "pending": [], "errors": {},
+        "complete": True,
+    }
+    descriptor = server.herdr_client.get_launch_descriptor_by_instance(
+        INSTANCE_ID, include_retired=True,
+    )
+    assert descriptor["state"] == "retirement_orphaned"
+    assert descriptor["retirement_resolution"] == "registry_identity_absent"
+    assert server.herdr_client.pending_launch_descriptor_retirements() == []
+
+
+@pytest.mark.parametrize("reference", ["live_instance", "live_location", "binding"])
+def test_retry_keeps_still_referenced_identity_pending(
+    monkeypatch, tmp_path, reference,
+):
+    _pending_descriptor(monkeypatch, tmp_path)
+    agent = {"name": "other", "pane_id": "other"}
+    if reference == "live_instance":
+        agent["name"] = INSTANCE_ID
+    if reference == "live_location":
+        agent["pane_id"] = "w1:p2"
+    monkeypatch.setattr(server, "_registry_scan", lambda: [])
+    monkeypatch.setattr(
+        server.herdr_client, "snapshot",
+        lambda: {
+            "available": True,
+            "sessions": [{"session": "demo", "agents": [agent]}],
+        },
+    )
+    monkeypatch.setattr(
+        server.team_sessions, "references_instance",
+        lambda _id: reference == "binding",
+    )
+
+    result = server._retry_pending_agent_retirements()
+
+    assert result["pending"] == [INSTANCE_ID]
+    assert result["orphaned"] == []
+    assert "仍被" in result["errors"][INSTANCE_ID]
+    assert server.herdr_client.get_launch_descriptor_by_instance(
+        INSTANCE_ID, include_retired=True,
+    )["state"] == "retirement_pending"
+
+
+def test_retry_fails_closed_when_herdr_snapshot_unavailable(monkeypatch, tmp_path):
+    _pending_descriptor(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        server.herdr_client, "snapshot",
+        lambda: {"available": False, "error": "offline"},
+    )
+
+    result = server._retry_pending_agent_retirements()
+
+    assert result["pending"] == [INSTANCE_ID]
+    assert result["orphaned"] == []
+    assert result["errors"] == {INSTANCE_ID: "offline"}
 
 
 def test_retire_team_codex_removes_scoped_exec_rule_before_finalize(

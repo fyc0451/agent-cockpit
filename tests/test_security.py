@@ -328,6 +328,7 @@ def test_server_main_configures_proxy_headers_by_auth_mode(
         "log_level": "info",
         "log_config": None,
         "access_log": False,
+        "timeout_graceful_shutdown": 10.0,
     }]
 
 

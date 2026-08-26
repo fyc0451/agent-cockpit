@@ -1919,6 +1919,29 @@ def test_delete_session_marks_each_managed_instance_pending(monkeypatch):
     }
 
 
+def test_orphaned_retirement_is_terminal_but_keeps_tombstone(monkeypatch):
+    instance_id = "i-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    herdr_client.save_launch_descriptor(
+        session="demo", pane_id="w1:p2", name=instance_id, kind="codex",
+        args=[], agent="codex", instance_id=instance_id, display_name="同名",
+    )
+    herdr_client.mark_launch_descriptor_retirement_pending("demo", "w1:p2")
+
+    orphan = herdr_client.finalize_launch_descriptor_retirement_orphaned(
+        instance_id, resolution="registry_identity_absent",
+    )
+
+    assert orphan["state"] == "retirement_orphaned"
+    assert orphan["retirement_resolution"] == "registry_identity_absent"
+    assert herdr_client.pending_launch_descriptor_retirements() == []
+    assert herdr_client.mark_launch_descriptor_retirement_pending(
+        "demo", "w1:p2",
+    )["instance_ids"] == []
+    assert herdr_client.fail_launch_descriptor_retirement(
+        instance_id, "late retry",
+    )["state"] == "retirement_orphaned"
+
+
 def test_descriptor_cleanup_failure_is_surfaced_not_silent(monkeypatch):
     monkeypatch.setattr(herdr_client, "is_available", lambda: True)
     herdr_client.save_launch_descriptor(

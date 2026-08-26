@@ -2850,6 +2850,7 @@ def list_workspace_launch_descriptors(
             )
             and record.get("state") in {
                 "active", "pending", "retired", "retirement_pending",
+                "retirement_orphaned",
             }
             and (
                 record.get("state") != "pending"
@@ -3159,7 +3160,8 @@ def rebind_live_launch_descriptor(
         record["state"] = "active"
         for key in (
             "retired_at", "retirement_pending_at", "retirement_error",
-            "retirement_attempts",
+            "retirement_attempts", "retirement_orphaned_at",
+            "retirement_resolution",
         ):
             record.pop(key, None)
         if mail_name:
@@ -3218,7 +3220,9 @@ def _mark_launch_descriptors_retirement_pending(
                 continue
             instance_id = record.get("instance_id")
             if isinstance(instance_id, str) and _AGENT_INSTANCE_ID_RE.fullmatch(instance_id):
-                if record.get("state", "active") == "retired":
+                if record.get("state", "active") in {
+                    "retired", "retirement_orphaned",
+                }:
                     continue
                 record["state"] = "retirement_pending"
                 record["retirement_pending_at"] = time.time()
@@ -3266,6 +3270,30 @@ def finalize_launch_descriptor_retirement(instance_id: str) -> dict[str, Any] | 
         record["state"] = "retired"
         record["retired_at"] = time.time()
         record.pop("retirement_error", None)
+        record.pop("retirement_orphaned_at", None)
+        record.pop("retirement_resolution", None)
+        _save_launch_descriptors(data)
+        return dict(record)
+
+
+def finalize_launch_descriptor_retirement_orphaned(
+    instance_id: str, *, resolution: str,
+) -> dict[str, Any] | None:
+    """把无法再证明 Hub 身份的历史 pending 收口为可审计孤儿墓碑。"""
+    opaque_id = validate_agent_instance_id(instance_id)
+    if resolution not in {"registry_identity_absent"}:
+        raise ValueError("retirement orphan resolution 无效")
+    with _LAUNCH_DESCRIPTOR_LOCK:
+        data = _load_launch_descriptors()
+        record = data["descriptors"].get(f"instance|{opaque_id}")
+        if not isinstance(record, dict):
+            return None
+        if record.get("state") != "retirement_pending":
+            return dict(record)
+        record["state"] = "retirement_orphaned"
+        record["retirement_orphaned_at"] = time.time()
+        record["retirement_resolution"] = resolution
+        record.pop("retirement_error", None)
         _save_launch_descriptors(data)
         return dict(record)
 
@@ -3280,7 +3308,7 @@ def fail_launch_descriptor_retirement(
         record = data["descriptors"].get(f"instance|{opaque_id}")
         if not isinstance(record, dict):
             return None
-        if record.get("state") == "retired":
+        if record.get("state") in {"retired", "retirement_orphaned"}:
             return dict(record)
         record["state"] = "retirement_pending"
         record["retirement_error"] = str(error)[:500]
