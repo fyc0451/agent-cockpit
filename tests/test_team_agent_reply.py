@@ -330,6 +330,72 @@ def test_team_work_respond_uses_persisted_mode_and_hides_secrets(monkeypatch):
     assert "registration-secret" not in response.text
 
 
+@pytest.mark.parametrize(
+    ("generation", "mail_name"),
+    [("run-2", "codex-main"), ("run-1", "replacement-main")],
+)
+def test_team_work_respond_rejects_changed_source_identity_before_hub(
+    monkeypatch, generation, mail_name,
+):
+    client = _prepare(monkeypatch, reply_mode="auto")
+    candidate = {
+        "session": "demo", "generation": "run-1", "mail_project": PROJECT,
+        "ready": True, "status": "done",
+        "lead": {
+            "agent": "codex", "mail_name": "codex-main",
+            "pane_id": "team-pane", "status": "done",
+        },
+    }
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: [candidate])
+    binding = team_sessions.list_bindings(HUB, 7)[0]
+    claimed = server.team_lead_worker.poll_binding(
+        binding, candidate,
+        claim=lambda *_args: {
+            "status": "claimed", "claim_token": "claim-secret",
+            "claim_expires_at": "2099-01-01T00:00:00+00:00",
+            "reply_mode": "auto",
+            "message": {
+                "inbox_item_id": 5, "message_id": 6, "subject": "remote",
+                "body_md": "REMOTE SECRET", "importance": "normal",
+                "sender_name": "Alice", "sender_handle": "alice",
+                "created_ts": "2026-08-25T10:00:00+08:00",
+            },
+        },
+        notify=lambda *_args: True,
+    )
+    candidate["generation"] = generation
+    candidate["lead"]["mail_name"] = mail_name
+    monkeypatch.setattr(
+        server.hub_client, "session_lead_reply",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale source must not reply")
+        ),
+    )
+    monkeypatch.setattr(
+        server.hub_client, "session_lead_complete",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale source must not complete")
+        ),
+    )
+
+    response = client.post(
+        f"/api/agent/team-work/{claimed['work_id']}/respond",
+        json={
+            "mail_project": PROJECT, "sender_name": "codex-main",
+            "registration_token": "registration-secret",
+            "mention_handles": ["fyc-mac"], "subject": "Re: remote",
+            "body_md": "done", "importance": "normal",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Invalid reply credentials"
+    assert server.team_lead_worker.work_for_binding(
+        claimed["work_id"], binding,
+    )["state"] == "pending"
+    assert server.team_lead_worker.reply_evidence_for_binding(HUB, "core") == {}
+
+
 def test_consult_bridge_uses_explicit_same_project_lead_and_fixed_prompt(monkeypatch):
     client = _prepare(monkeypatch)
     monkeypatch.setattr(server, "_registry_scan", lambda: [
@@ -495,17 +561,35 @@ def test_consult_bridge_fails_closed_after_session_generation_changes(
         "kind": "status", "question": "状态？",
     })
     assert created.status_code == 200
+    request_id = created.json()["consult"]["request_id"]
     if restarted == "source":
         source["generation"] = "run-2"
     else:
         target["generation"] = "dev-run-2"
 
+    response = client.post(
+        f"/api/agent/project-consult/{request_id}/respond",
+        json={
+            "mail_project": PROJECT, "sender_name": "dev-main",
+            "registration_token": "dev-secret", "response": "不得送达",
+        },
+    )
     denied = client.post("/api/agent/project-consult/next", json={
         "mail_project": PROJECT, "sender_name": "dev-main",
         "registration_token": "dev-secret",
     })
+    snapshot = server.team_lead_worker.consult_snapshot(request_id)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Team Agent 已重启或身份变化"
+        if restarted == "source"
+        else "咨询目标已重启或身份变化"
+    )
     assert denied.status_code == 200
     assert denied.json()["status"] == "empty"
+    assert snapshot["state"] == "invalidated"
+    assert snapshot["failure_reason"] == f"{restarted}_identity_changed"
 
 
 @pytest.mark.parametrize("reply_mode", ["confirm", "auto"])
