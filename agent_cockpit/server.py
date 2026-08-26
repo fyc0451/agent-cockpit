@@ -32,7 +32,7 @@ from urllib.parse import quote, urlsplit
 from fastapi import Body, FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
@@ -6456,14 +6456,32 @@ def api_chat_session_file_read(name: str, path: str):
         raise HTTPException(400, str(e))
 
 
-def _download_file_response(target: Path) -> FileResponse:
-    """让手机按 UTF-8 纯文本打开 Markdown，同时保持下载字节不变。"""
-    media_type = (
-        "text/plain; charset=utf-8"
-        if target.suffix.lower() in {".md", ".markdown"}
-        else None
+def _download_file_response(target: Path) -> FileResponse | StreamingResponse:
+    """Markdown 下载副本带 UTF-8 BOM，兼容忽略 HTTP charset 的手机查看器。"""
+    if target.suffix.lower() not in {".md", ".markdown"}:
+        return FileResponse(target, filename=target.name)
+
+    quoted_name = quote(target.name)
+    disposition = (
+        f"attachment; filename*=utf-8''{quoted_name}"
+        if quoted_name != target.name
+        else f'attachment; filename="{target.name}"'
     )
-    return FileResponse(target, filename=target.name, media_type=media_type)
+
+    def body():
+        yield b"\xef\xbb\xbf"
+        with target.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                yield chunk
+
+    return StreamingResponse(
+        body(),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": disposition,
+            "Content-Length": str(target.stat().st_size + 3),
+        },
+    )
 
 
 @app.get("/api/chat/sessions/{name}/files/download")

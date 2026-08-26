@@ -84,9 +84,10 @@ def test_markdown_download_uses_mobile_safe_utf8_text_type(tmp_path, monkeypatch
     )
 
     assert response.status_code == 200
-    assert response.content == content.encode("utf-8")
+    assert response.content == b"\xef\xbb\xbf" + content.encode("utf-8")
     assert response.headers["content-type"] == "text/plain; charset=utf-8"
     assert response.headers["content-disposition"] == 'attachment; filename="REPORT.md"'
+    assert response.headers["content-length"] == str(len(content.encode("utf-8")) + 3)
 
 
 def test_isolate_download_roots_does_not_pollute_original_resolved_roots(

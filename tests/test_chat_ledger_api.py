@@ -2189,9 +2189,10 @@ def test_chat_markdown_download_uses_mobile_safe_utf8_text_type(isolated_ledger)
     )
 
     assert downloaded.status_code == 200
-    assert downloaded.content == content.encode("utf-8")
+    assert downloaded.content == b"\xef\xbb\xbf" + content.encode("utf-8")
     assert downloaded.headers["content-type"] == "text/plain; charset=utf-8"
     assert downloaded.headers["content-disposition"] == 'attachment; filename="REPORT.md"'
+    assert downloaded.headers["content-length"] == str(len(content.encode("utf-8")) + 3)
 
 
 def test_files_hidden_without_workspace(isolated_ledger):
