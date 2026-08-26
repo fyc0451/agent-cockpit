@@ -3328,6 +3328,58 @@ def test_harvest_persists_turn_duration_and_marks_read(isolated_ledger, monkeypa
     assert ("chat-turn", "w1:p2") not in server._PANE_TURN_STARTED
 
 
+def test_harvest_reply_backfills_read_after_identity_appears(
+    isolated_ledger, monkeypatch,
+):
+    """working 时尚无花名，settled 回复落账后仍须补上真实收件人已读。"""
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "late-mail-name", "chat-late-name")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._PANE_IDLE_SINCE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    monkeypatch.setattr(server, "_HARVEST_SETTLE_S", 0.0)
+    sent = chat_ledger.append_message(
+        "chat-late-name", kind="me", sender="human", text="处理这条",
+        to=["BrownDesert"], delivery="queue",
+    )
+    chat_ledger.mark_message_notified(sent["id"], ["BrownDesert"])
+    panes = [{
+        "session": "chat-late-name",
+        "pane_id": "w1:p2",
+        "agent": "grok",
+        "agent_status": "working",
+        "mail_name": "",
+        "display_name": "grok",
+        "terminal_title": "正在处理",
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: {"summary": "这条已经处理完成，并形成了可以交付的完整回复。"},
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+
+    server._harvest_settled_replies("chat-late-name")
+    assert chat_ledger.list_messages("chat-late-name")[0].get("read_by") in (None, [])
+
+    panes[0].update({
+        "agent_status": "idle",
+        "mail_name": "BrownDesert",
+        "display_name": "BrownDesert",
+    })
+    server._harvest_settled_replies("chat-late-name")
+
+    messages = chat_ledger.list_messages("chat-late-name")
+    assert messages[0]["read_by"] == ["BrownDesert"]
+    assert messages[-1]["kind"] == "agent"
+    assert messages[-1]["sender"] == "BrownDesert"
+
+
 def _git_run(repo: Path, *args: str) -> None:
     import subprocess
     subprocess.run(

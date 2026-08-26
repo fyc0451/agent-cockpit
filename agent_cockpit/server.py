@@ -7639,6 +7639,8 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
                     match["text"] = text
                     _PANE_LAST_MESSAGE[key] = str(updated["id"])
                     _finish_chat_turn(session, pane_id, str(updated["id"]))
+                    if turn_started is not None:
+                        _mark_busy_chat_mail_read(session, pane)
                 _PANE_LAST_HARVEST[key] = digest
                 _PANE_TURN_STARTED.pop(key, None)
                 _save_harvest_status()
@@ -7646,6 +7648,8 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
             if text == old or _same_harvest_copy(old, text):
                 _PANE_LAST_HARVEST[key] = digest
                 _finish_chat_turn(session, pane_id, str(match["id"]))
+                if turn_started is not None:
+                    _mark_busy_chat_mail_read(session, pane)
                 _save_harvest_status()
                 continue
         duration_ms = None
@@ -7665,6 +7669,10 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
             continue
         _PANE_LAST_HARVEST[key] = digest
         _PANE_LAST_MESSAGE[key] = str(saved["id"])
+        if turn_started is not None:
+            # 回复已成功进入账本，是 Agent 已开始处理的强证据。启动阶段身份尚未
+            # 丰富时可能漏掉 working 回执；此处用 settled pane 的真实花名幂等补写。
+            _mark_busy_chat_mail_read(session, pane)
         _save_harvest_status()
         recent.append(saved)
     _flush_queued_chat_mail(session, snap)
