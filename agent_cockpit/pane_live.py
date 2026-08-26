@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import re
 import time
@@ -369,12 +370,9 @@ def check_agent_mail_connectivity(session: str, pane_id: str) -> dict[str, Any]:
         pane_name = str((pane or {}).get("mail_name") or "").strip()
         has_mail_name = bool(roster_name or pane_name)
 
-        can_send_mail = False
-        try:
-            from agent_mail_commands import mail_send  # noqa: F401
-            can_send_mail = True
-        except Exception:
-            pass
+        # 这里只检查 helper 是否已安装，不能导入 mail_send。后者会执行 Agent
+        # 专属环境校验，而 8790 服务进程按设计没有 HERDR_CONFIG_PATH 等变量。
+        can_send_mail = _mail_send_module_available()
 
         connected = has_mail_name and herdr_up and has_live_agent and can_send_mail
         return {
@@ -390,3 +388,9 @@ def check_agent_mail_connectivity(session: str, pane_id: str) -> dict[str, Any]:
     except Exception as e:
         return {"connected": False, "error": str(e), "pane_id": pane_id}
 
+
+def _mail_send_module_available() -> bool:
+    try:
+        return importlib.util.find_spec("agent_mail_commands.mail_send") is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
