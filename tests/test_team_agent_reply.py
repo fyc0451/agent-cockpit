@@ -21,6 +21,7 @@ def _prepare(
         "public_team_config",
         lambda: {"team_hub": HUB, "human_auth": "http://auth.example"},
     )
+    monkeypatch.setattr(server.hub_client, "session_lead_status", lambda *_args: {})
     monkeypatch.setattr(server, "_registry_scan", lambda: [{
         "project_key": PROJECT,
         "name": "codex-main",
@@ -604,6 +605,11 @@ def test_worker_tick_wakes_running_done_lead(monkeypatch, reply_mode):
         },
     }])
     calls = []
+    statuses = []
+    monkeypatch.setattr(
+        server.hub_client, "session_lead_status",
+        lambda slug, payload: statuses.append((slug, payload)) or {},
+    )
     monkeypatch.setattr(
         server.team_lead_worker, "poll_binding",
         lambda binding, candidate, **_kwargs: calls.append((binding, candidate)),
@@ -614,6 +620,37 @@ def test_worker_tick_wakes_running_done_lead(monkeypatch, reply_mode):
     assert len(calls) == 1
     assert calls[0][0]["reply_mode"] == reply_mode
     assert calls[0][1]["lead"]["pane_id"] == "done-pane"
+    assert statuses == [("core", {
+        "client_session_id": "client-1",
+        "reply_token": "reply-secret",
+        "status": "idle",
+    })]
+
+
+def test_worker_tick_status_failure_does_not_block_inbox(monkeypatch):
+    _prepare(monkeypatch)
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: [{
+        "session": "demo", "generation": "run-1", "mail_project": PROJECT,
+        "ready": True, "status": "working",
+        "lead": {
+            "agent": "codex", "mail_name": "codex-main",
+            "pane_id": "pane-1", "status": "working",
+        },
+    }])
+    monkeypatch.setattr(
+        server.hub_client,
+        "session_lead_status",
+        lambda *_args: (_ for _ in ()).throw(server.hub_client.HumanAPIError(502, "down")),
+    )
+    calls = []
+    monkeypatch.setattr(
+        server.team_lead_worker, "poll_binding",
+        lambda binding, candidate, **_kwargs: calls.append((binding, candidate)),
+    )
+
+    server._team_lead_worker_tick()
+
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("status", ["stopped", "unknown"])

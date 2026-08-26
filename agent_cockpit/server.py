@@ -5344,6 +5344,24 @@ def _active_team_lead_bindings() -> list[tuple[dict[str, Any], dict[str, Any]]]:
 def _team_lead_worker_tick() -> None:
     with _TEAM_SESSION_BIND_LOCK:
         for binding, candidate in _active_team_lead_bindings():
+            lead = candidate.get("lead") if isinstance(candidate.get("lead"), dict) else {}
+            runtime_status = lead.get("status")
+            if runtime_status == "done":
+                runtime_status = "idle"
+            try:
+                hub_client.session_lead_status(
+                    str(binding["project_slug"]),
+                    {
+                        "client_session_id": str(binding["client_session_id"]),
+                        "reply_token": str(binding["reply_token"]),
+                        "status": runtime_status,
+                    },
+                )
+            except hub_client.HumanAPIError as exc:
+                if exc.status_code not in {403, 409}:
+                    logger.warning("Team Lead 状态心跳暂时失败: HTTP %s", exc.status_code)
+            except Exception:
+                logger.exception("Team Lead 状态心跳失败")
             try:
                 team_lead_worker.poll_binding(
                     binding,

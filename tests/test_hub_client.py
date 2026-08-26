@@ -479,11 +479,13 @@ def test_session_lead_capability_helpers_use_only_fixed_paths(monkeypatch):
     monkeypatch.setattr(hub_client.httpx, "Client", Client)
 
     hub_client.session_lead_claim("core", {"reply_token": "secret"})
+    hub_client.session_lead_status("core", {"reply_token": "secret", "status": "idle"})
     hub_client.session_lead_complete("core", 31, {"claim_token": "claim"})
     hub_client.session_lead_reply("core", {"reply_token": "secret"})
 
     assert [call[0] for call in calls] == [
         "https://team.example/hub/api/projects/core/session-lead/inbox/claim",
+        "https://team.example/hub/api/projects/core/session-lead/status",
         "https://team.example/hub/api/projects/core/session-lead/inbox/31/complete",
         "https://team.example/hub/api/projects/core/session-lead/reply",
     ]

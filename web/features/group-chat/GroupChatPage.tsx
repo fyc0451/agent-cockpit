@@ -482,7 +482,8 @@ export function GroupChatPage() {
   const teamMembersWithAgents = useMemo(() => (
     (teamMembersQ.data ?? []).map((member) => {
       if (
-        !currentTeamMentionHandle
+        member.agent
+        || !currentTeamMentionHandle
         || member.mention_handle.toLowerCase() !== currentTeamMentionHandle.toLowerCase()
         || !activeTeamBinding
       ) return member

@@ -227,7 +227,7 @@ def _session_lead_capability_post(
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", project_slug):
         raise ValueError("project_slug 无效")
     if path not in {
-        "inbox/claim", "reply",
+        "status", "inbox/claim", "reply",
     } and not re.fullmatch(r"inbox/[1-9][0-9]*/complete", path):
         raise ValueError("Session lead capability 路径无效")
     if not isinstance(payload, dict):
@@ -264,6 +264,15 @@ def session_lead_claim(
     """受限领取当前 binding 的一条 Team Inbox 消息。"""
     return _session_lead_capability_post(
         project_slug, "inbox/claim", payload, action="收件领取",
+    )
+
+
+def session_lead_status(
+    project_slug: str, payload: dict[str, Any],
+) -> dict[str, Any]:
+    """上报当前 binding 的最小本地运行状态。"""
+    return _session_lead_capability_post(
+        project_slug, "status", payload, action="状态心跳",
     )
 
 

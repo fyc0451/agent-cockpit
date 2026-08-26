@@ -843,6 +843,7 @@ function parseTeamMember(raw: unknown): TeamMember | null {
           kind: typeof agent.kind === 'string' ? agent.kind : null,
           status: typeof agent.status === 'string' ? agent.status : null,
           managed: agent.managed === true,
+          lastSeenAt: typeof agent.last_seen_at === 'string' ? agent.last_seen_at : null,
         }
       : null,
   }

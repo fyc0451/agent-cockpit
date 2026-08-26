@@ -95,5 +95,6 @@ export interface TeamMember {
     kind: string | null
     status: string | null
     managed: boolean
+    lastSeenAt?: string | null
   } | null
 }

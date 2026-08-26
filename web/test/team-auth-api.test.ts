@@ -105,6 +105,13 @@ describe('团队普通成员 API', () => {
             status: 'active',
             online: true,
             last_seen_at: '2026-08-24T14:00:00Z',
+            agent: {
+              name: 'RainyRidge',
+              kind: null,
+              status: 'working',
+              managed: true,
+              last_seen_at: '2026-08-24T14:00:01Z',
+            },
           }],
         }),
       })
@@ -117,6 +124,12 @@ describe('团队普通成员 API', () => {
       mention_handle: 'alice',
       online: true,
       last_seen_at: '2026-08-24T14:00:00Z',
+      agent: {
+        name: 'RainyRidge',
+        status: 'working',
+        managed: true,
+        lastSeenAt: '2026-08-24T14:00:01Z',
+      },
     }])
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/team/presence', {
       method: 'POST',
