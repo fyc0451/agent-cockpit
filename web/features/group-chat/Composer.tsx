@@ -51,7 +51,6 @@ export function Composer({
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null)
   const [activeIdx, setActiveIdx] = useState(0)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [fileAccept, setFileAccept] = useState('*/*')
   const [skills, setSkills] = useState<ChatSkill[]>(() => composerSkills(session))
   const [open, setOpen] = useState(false)
   const [tall, setTall] = useState(false)
@@ -238,9 +237,11 @@ export function Composer({
   }, [menuOpen])
 
   const pickFile = (accept: string) => {
-    setFileAccept(accept)
+    const input = fileRef.current
+    if (!input) return
+    input.accept = accept
     setMenuOpen(false)
-    requestAnimationFrame(() => fileRef.current?.click())
+    input.click()
   }
 
   return (
@@ -351,7 +352,7 @@ export function Composer({
           <input
             ref={fileRef}
             type="file"
-            accept={fileAccept}
+            accept="*/*"
             hidden
             onChange={(e) => {
               const file = e.target.files?.[0]

@@ -6456,6 +6456,16 @@ def api_chat_session_file_read(name: str, path: str):
         raise HTTPException(400, str(e))
 
 
+def _download_file_response(target: Path) -> FileResponse:
+    """让手机按 UTF-8 纯文本打开 Markdown，同时保持下载字节不变。"""
+    media_type = (
+        "text/plain; charset=utf-8"
+        if target.suffix.lower() in {".md", ".markdown"}
+        else None
+    )
+    return FileResponse(target, filename=target.name, media_type=media_type)
+
+
 @app.get("/api/chat/sessions/{name}/files/download")
 def api_chat_session_file_download(name: str, path: str):
     """下载所属工作区目录内的文件。"""
@@ -6467,7 +6477,7 @@ def api_chat_session_file_download(name: str, path: str):
         target = files.download_under_root(root, path)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return FileResponse(target, filename=target.name)
+    return _download_file_response(target)
 
 
 @app.get("/api/chat/sessions/{name}/files/raw")
@@ -9139,7 +9149,7 @@ def api_files_download(path: str):
     """下载单个文件。"""
     try:
         target = files.download_path(path)
-        return FileResponse(target, filename=target.name)
+        return _download_file_response(target)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

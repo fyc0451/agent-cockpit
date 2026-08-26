@@ -33,6 +33,32 @@ describe('Composer 附件与 Skill 菜单', () => {
     expect(await screen.findByRole('menuitem', { name: 'Skill 39' })).toBeInTheDocument()
   })
 
+  it('在菜单点击事件内同步打开手机文件选择器', async () => {
+    let container!: HTMLElement
+    await act(async () => {
+      container = render(
+        <Composer
+          members={[]}
+          leader={null}
+          value=""
+          onChange={vi.fn()}
+          onSend={vi.fn()}
+          onAttach={vi.fn()}
+          disabled={false}
+        />,
+      ).container
+    })
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')
+    expect(input).not.toBeNull()
+    const click = vi.spyOn(input!, 'click')
+
+    fireEvent.click(screen.getByRole('button', { name: '＋' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '上传图片' }))
+
+    expect(input).toHaveAttribute('accept', 'image/*')
+    expect(click).toHaveBeenCalledOnce()
+  })
+
   it('IME 组字和组字结束后的同一轮回车都不误发', async () => {
     const onSend = vi.fn()
     await act(async () => {

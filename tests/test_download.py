@@ -70,6 +70,25 @@ def test_download_endpoint_streams_attachment(tmp_path, monkeypatch):
     assert response.headers["content-disposition"] == 'attachment; filename="example.txt"'
 
 
+def test_markdown_download_uses_mobile_safe_utf8_text_type(tmp_path, monkeypatch):
+    uploads = _isolate_download_roots(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "COCKPIT_TOKEN", "secret", raising=False)
+    target = uploads / "REPORT.md"
+    content = "# 最新审计报告\n\n中文内容"
+    target.write_text(content, encoding="utf-8")
+
+    response = TestClient(server.app).get(
+        "/api/files/download",
+        params={"path": str(target)},
+        headers={"authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == content.encode("utf-8")
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert response.headers["content-disposition"] == 'attachment; filename="REPORT.md"'
+
+
 def test_isolate_download_roots_does_not_pollute_original_resolved_roots(
     tmp_path, monkeypatch,
 ):

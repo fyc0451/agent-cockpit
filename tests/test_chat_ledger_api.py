@@ -2174,6 +2174,26 @@ def test_chat_upload_lands_in_workspace_inbox(isolated_ledger):
     assert downloaded.content == b"pngdata"
 
 
+def test_chat_markdown_download_uses_mobile_safe_utf8_text_type(isolated_ledger):
+    client = _client()
+    proj = isolated_ledger / "markdown-ws"
+    _workspace_with_thread(client, proj, "markdown-1")
+    report = proj / "REPORT.md"
+    content = "# 审计报告\n\n中文内容"
+    report.write_text(content, encoding="utf-8")
+
+    downloaded = client.get(
+        "/api/chat/sessions/markdown-1/files/download",
+        headers=_headers(),
+        params={"path": str(report)},
+    )
+
+    assert downloaded.status_code == 200
+    assert downloaded.content == content.encode("utf-8")
+    assert downloaded.headers["content-type"] == "text/plain; charset=utf-8"
+    assert downloaded.headers["content-disposition"] == 'attachment; filename="REPORT.md"'
+
+
 def test_files_hidden_without_workspace(isolated_ledger):
     listed = _client().get("/api/chat/sessions/orphan/files", headers=_headers())
     assert listed.status_code == 404
