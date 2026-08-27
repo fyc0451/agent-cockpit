@@ -8371,21 +8371,6 @@ def _notify_chat_recipients(
     return notified
 
 
-def _queued_mail_already_answered(
-    row: dict[str, Any], rows: list[dict[str, Any]], dest: str,
-) -> bool:
-    """终端里已经回过这条排队：后面有同花名的 agent 气泡，就不要再 pane_send。"""
-    stamp = int(row.get("ts") or 0)
-    for later in rows:
-        if int(later.get("ts") or 0) <= stamp:
-            continue
-        if str(later.get("kind") or "") != "agent":
-            continue
-        if str(later.get("sender") or "") == dest:
-            return True
-    return False
-
-
 def _flush_queued_chat_mail(session: str, snap: dict[str, Any]) -> None:
     """成员从忙碌回到空闲后，把还没叫醒的排队消息投进去。"""
     try:
@@ -8439,14 +8424,6 @@ def _flush_queued_chat_mail(session: str, snap: dict[str, Any]) -> None:
             }
             if dest in already:
                 continue
-            if _queued_mail_already_answered(row, rows, dest):
-                try:
-                    updated = chat_ledger.mark_message_notified(str(row["id"]), [dest])
-                except ValueError:
-                    continue
-                if updated:
-                    row["notified_to"] = list(updated.get("notified_to") or [])
-                continue
             hint = _chat_notify_hint(session, str(row.get("text") or ""), "queue")
             try:
                 herdr_client.pane_send(session, pane_id, hint, "prompt")
@@ -8458,6 +8435,9 @@ def _flush_queued_chat_mail(session: str, snap: dict[str, Any]) -> None:
                 continue
             if updated:
                 row["notified_to"] = list(updated.get("notified_to") or [])
+                # 一个 pane 一次只领一条。Herdr 状态切到 working 前仍可能短暂
+                # 显示 idle；本轮继续 pane_send 会把多条排队同时塞进同一输入流。
+                break
 
 
 @app.post("/api/chat/sessions/{name}/mail")

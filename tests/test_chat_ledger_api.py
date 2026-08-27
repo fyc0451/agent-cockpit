@@ -41,8 +41,10 @@ def _harvest_immediate(monkeypatch):
     """harvest 稳定窗默认归零：各用例单步驱动状态机，不等真实 3s 窗。"""
     monkeypatch.setattr(server, "_HARVEST_SETTLE_S", 0.0)
     server._PANE_IDLE_SINCE.clear()
+    server._PANE_LAST_REVISION.clear()
     yield
     server._PANE_IDLE_SINCE.clear()
+    server._PANE_LAST_REVISION.clear()
 
 
 def _headers() -> dict[str, str]:
@@ -1415,7 +1417,9 @@ def test_notify_queue_waits_when_idle_pane_is_still_changing(isolated_ledger, mo
     assert "终端里已经在说了" in sent[0][2]
 
 
-def test_flush_skips_queued_mail_already_answered_in_terminal(isolated_ledger, monkeypatch):
+def test_flush_does_not_treat_unrelated_later_reply_as_queue_answer(
+    isolated_ledger, monkeypatch,
+):
     sent: list[tuple] = []
     pane = {
         "session": "cockpit", "pane_id": "w1:p1", "agent": "grok",
@@ -1437,12 +1441,49 @@ def test_flush_skips_queued_mail_already_answered_in_terminal(isolated_ledger, m
     )
     chat_ledger.append_message(
         "cockpit", kind="agent", sender="BrownDesert",
-        text="结论：终端里做完了。", to=["human"], ts=2000,
+        text="结论：上一项 GPU 测试做完了。", to=["human"], ts=2000,
     )
     server._flush_queued_chat_mail("cockpit", {"panes": [pane]})
-    assert sent == []
+    assert len(sent) == 1
+    assert "终端里已经在处理" in sent[0][2]
     stored = next(row for row in chat_ledger.list_messages("cockpit") if row["id"] == queued["id"])
     assert stored["notified_to"] == ["BrownDesert"]
+
+
+def test_flush_delivers_only_one_queued_message_per_idle_pane(
+    isolated_ledger, monkeypatch,
+):
+    sent: list[tuple] = []
+    pane = {
+        "session": "cockpit", "pane_id": "w1:p1", "agent": "grok",
+        "mail_name": "BrownDesert", "display_name": "BrownDesert",
+        "agent_status": "idle", "revision": 3,
+    }
+    monkeypatch.setattr(server, "_ensure_session_leader", lambda *_: {
+        "leader_mail_name": "BrownDesert",
+    })
+    monkeypatch.setattr(
+        server.herdr_client, "pane_send",
+        lambda *args: sent.append(args) or {"available": True},
+    )
+    server._PANE_IDLE_SINCE.clear()
+    server._PANE_LAST_REVISION.clear()
+    first = chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="第一条排队消息",
+        to=["BrownDesert"], delivery="queue", ts=1000,
+    )
+    second = chat_ledger.append_message(
+        "cockpit", kind="me", sender="human", text="第二条排队消息",
+        to=["BrownDesert"], delivery="queue", ts=2000,
+    )
+
+    server._flush_queued_chat_mail("cockpit", {"panes": [pane]})
+
+    assert len(sent) == 1
+    assert "第一条排队消息" in sent[0][2]
+    rows = {row["id"]: row for row in chat_ledger.list_messages("cockpit")}
+    assert rows[first["id"]]["notified_to"] == ["BrownDesert"]
+    assert rows[second["id"]].get("notified_to") in (None, [])
 
 
 def test_notify_interrupt_wakes_busy_pane(isolated_ledger, monkeypatch):
