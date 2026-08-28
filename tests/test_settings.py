@@ -681,7 +681,12 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
         "human_change_password",
         lambda authorization, new_password: calls.append(
             ("password", authorization, new_password)
-        ) or {"ok": True},
+        ) or {
+            "ok": True,
+            "access_token": "replacement.jwt",
+            "token_type": "Bearer",
+            "expires_in": 600,
+        },
     )
     client = TestClient(server.app)
     headers = {"authorization": "Bearer secret"}
@@ -719,6 +724,7 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
     )
     assert changed.status_code == 200
     assert changed.json() == {"ok": True}
+    assert "cockpit_team_human_session=replacement.jwt" in changed.headers["set-cookie"]
     logged_out = client.post("/api/team-auth/logout", headers=headers)
     assert logged_out.status_code == 200
     assert "cockpit_team_human_session=" in logged_out.headers["set-cookie"]

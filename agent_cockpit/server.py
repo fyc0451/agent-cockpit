@@ -6052,13 +6052,35 @@ def api_team_auth_logout(request: Request, req: HumanPresenceReq | None = None):
 @app.patch("/api/team-auth/password")
 def api_team_auth_change_password(req: HumanPasswordChangeReq, request: Request):
     try:
-        return hub_client.human_change_password(
+        data = hub_client.human_change_password(
             _team_human_authorization(request), req.new_password
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except hub_client.HumanAuthError as exc:
         _raise_human_auth_error(exc)
+    token = data.get("access_token")
+    expires_in = data.get("expires_in")
+    if (
+        not isinstance(token, str)
+        or not token
+        or len(token) > 8192
+        or isinstance(expires_in, bool)
+        or not isinstance(expires_in, int)
+        or not 1 <= expires_in <= 7 * 24 * 60 * 60
+    ):
+        raise HTTPException(502, "Human issuer 返回了无效的换发令牌")
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        TEAM_AUTH_COOKIE,
+        token,
+        max_age=expires_in,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/api",
+    )
+    return response
 
 
 @app.get("/api/team-auth/inbox-route/status")

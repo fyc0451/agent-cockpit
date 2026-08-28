@@ -608,3 +608,60 @@ def test_human_account_lifecycle_calls_fixed_remote_issuer_routes(monkeypatch):
         {"expires_in": 3600},
     )
     assert calls[5][3]["Authorization"] == "Bearer human.jwt"
+
+
+def test_human_admin_routes_add_private_second_factor_only(monkeypatch, tmp_path):
+    token_file = tmp_path / "admin-access-token"
+    token_file.write_text(
+        "public-admin-factor-0123456789abcdef", encoding="utf-8"
+    )
+    token_file.chmod(0o600)
+    calls = []
+
+    class Response:
+        is_error = False
+
+        def json(self):
+            return {"users": []}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def request(self, method, url, json, headers):
+            calls.append((method, url, json, headers))
+            return Response()
+
+    monkeypatch.setattr(hub_client, "HUMAN_AUTH_URL", "https://auth.example")
+    monkeypatch.setattr(
+        hub_client, "TEAM_ADMIN_ACCESS_TOKEN_FILE", str(token_file)
+    )
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+
+    hub_client.human_profile("Bearer human.jwt")
+    hub_client.human_list_users("Bearer human.jwt")
+
+    assert "X-Agent-Hub-Admin-Key" not in calls[0][3]
+    assert calls[1][3]["X-Agent-Hub-Admin-Key"] == (
+        "public-admin-factor-0123456789abcdef"
+    )
+
+
+def test_human_admin_route_rejects_readable_second_factor_file(monkeypatch, tmp_path):
+    token_file = tmp_path / "admin-access-token"
+    token_file.write_text(
+        "public-admin-factor-0123456789abcdef", encoding="utf-8"
+    )
+    token_file.chmod(0o644)
+    monkeypatch.setattr(
+        hub_client, "TEAM_ADMIN_ACCESS_TOKEN_FILE", str(token_file)
+    )
+
+    with pytest.raises(ValueError, match="0600"):
+        hub_client.human_list_users("Bearer human.jwt")

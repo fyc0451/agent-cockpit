@@ -194,7 +194,9 @@ Team Topic 不会远控其他成员的机器，也不会把远端正文直接注
 
 1. 部署一个团队共享的
    [mcp_agent_mail](https://github.com/fyc0451/mcp_agent_mail) Team Hub 与 Human
-   issuer。Cockpit 的本机 Hub 安装器不等于公网团队服务。
+   issuer。Cockpit 的本机 Hub 安装器不等于公网团队服务；公网部署使用 Hub 仓库的
+   `deploy/public-hub/` 配置，公网只开放反向代理的 HTTPS `443`，不得开放成员的
+   `8790`、Hub 后端 `8765/8766`、Redis 或数据库端口。
 2. 每位成员在自己的 Cockpit「设置 → 团队 Hub 连接」填写相同的两个地址。
 3. 在 `/#/team` 创建 Topic，生成邀请链接并发给真实成员。
 4. 成员注册后，管理员点一次「批准加入」；成员随后登录并绑定自己的 Session。
@@ -218,6 +220,7 @@ Team Topic 不会远控其他成员的机器，也不会把远端正文直接注
 | `AGENT_MAIL_DB_PATH` | 自动探测 | Agent Mail `storage.sqlite3` 自定义路径 |
 | `COCKPIT_VAPID_SUBJECT` | `mailto:agent-cockpit@localhost` | Web Push VAPID contact |
 | `COCKPIT_VAPID_PRIVATE_KEY` / `PUBLIC_KEY` | 自动生成 | 多实例部署时可固定 VAPID 密钥对 |
+| `TEAM_ADMIN_ACCESS_TOKEN_FILE` | 空 | 公网 Hub 管理员二次因子文件；仅管理员机器配置，文件权限必须为 `0600` |
 
 Agent Mail 数据库会依次探测新版 `~/.local/share/mcp_agent_mail/` 和旧版
 `~/mcp_agent_mail/`。hub token 自动从 `~/.agent-mail/client.env` 读取,不要硬编码。

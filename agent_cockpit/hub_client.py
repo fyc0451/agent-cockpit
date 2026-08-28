@@ -12,6 +12,8 @@ import json
 import os
 import re
 import socket
+import stat
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -27,6 +29,9 @@ HUB, TOKEN = load_client_config()
 # Agent Mail 协作流量一并切走；未配置时保持旧行为并复用 HUB。
 TEAM_HUB_URL = os.environ.get("TEAM_HUB_URL", "").strip().rstrip("/")
 HUMAN_AUTH_URL = os.environ.get("HUMAN_AUTH_URL", "http://127.0.0.1:8766").rstrip("/")
+TEAM_ADMIN_ACCESS_TOKEN_FILE = os.environ.get(
+    "TEAM_ADMIN_ACCESS_TOKEN_FILE", ""
+).strip()
 _headers = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream",
@@ -427,6 +432,21 @@ def _human_auth_api(
     headers = {"Accept": "application/json"}
     if authorization:
         headers["Authorization"] = authorization
+    if path.startswith("/admin/") and TEAM_ADMIN_ACCESS_TOKEN_FILE:
+        token_path = Path(TEAM_ADMIN_ACCESS_TOKEN_FILE).expanduser()
+        try:
+            info = token_path.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+                raise ValueError("团队管理员二次密钥文件必须是权限 0600 的普通文件")
+            raw = token_path.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"无法读取团队管理员二次密钥文件: {exc}") from exc
+        if not 32 <= len(raw.strip()) <= 512:
+            raise ValueError("团队管理员二次密钥长度必须为 32–512 字节")
+        try:
+            headers["X-Agent-Hub-Admin-Key"] = raw.decode("utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise ValueError("团队管理员二次密钥必须是 UTF-8 文本") from exc
     try:
         with httpx.Client(timeout=10) as client:
             response = client.request(
