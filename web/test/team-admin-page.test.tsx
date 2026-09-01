@@ -98,15 +98,28 @@ describe('TeamAdminPage 团队管理页', () => {
     })
   })
 
-  it('管理员可为 topic 生成邀请链接', async () => {
-    renderPage({
-      '/api/team-auth/status': ADMIN_STATUS,
-      '/api/team/projects': { projects: [{ slug: 'ready', name: 'hr-ready', id: 1 }] },
-      '/api/team-auth/users': { users: [] },
-      '/api/team-auth/invitations': {
-        invite_code: 'INVITE-XYZ', project_slug: 'ready', expires_at: 123,
-      },
+  it('管理员可生成并在刷新后查看团队永久邀请链接', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
     })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      const body = url.endsWith('/api/team-auth/status') ? ADMIN_STATUS
+        : url.endsWith('/api/team-auth/users') ? { users: [] }
+        : url.endsWith('/api/team/projects') ? { projects: [] }
+        : url.endsWith('/api/team-auth/team-invitation') && method === 'POST'
+          ? { invitation: { invite_code: 'INVITE-XYZ', created_at: 123, expires_at: null, use_count: 0 } }
+        : url.endsWith('/api/team-auth/team-invitation') ? { invitation: null }
+        : {}
+      return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) } as Response
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter><TeamAdminPage /></MemoryRouter>
+      </QueryClientProvider>,
+    )
     await screen.findByText('账号管理')
     await userEvent.setup().click(screen.getByText('生成团队邀请链接'))
     const invitation = await screen.findByRole('textbox', { name: '团队邀请链接' })
@@ -116,6 +129,7 @@ describe('TeamAdminPage 团队管理页', () => {
       expect(writeClipboard).toHaveBeenCalledWith(expect.stringContaining('team_invite=INVITE-XYZ'))
     })
     expect(screen.getByRole('status')).toHaveTextContent('已复制到剪贴板')
+    expect(screen.getByText('永久有效，已使用 0 次')).toBeInTheDocument()
   })
 
   it('管理员可新建 topic，重名错误直接展示', async () => {

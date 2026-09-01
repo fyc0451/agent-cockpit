@@ -653,6 +653,55 @@ def test_human_admin_routes_add_private_second_factor_only(monkeypatch, tmp_path
     )
 
 
+def test_team_invitation_lifecycle_uses_fixed_admin_route(monkeypatch):
+    calls = []
+
+    class Response:
+        is_error = False
+
+        def json(self):
+            return {"invitation": None}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def request(self, method, url, json, headers):
+            calls.append((method, url, json, headers))
+            return Response()
+
+    monkeypatch.setattr(
+        hub_client, "HUMAN_AUTH_URL", "https://team.example/human-auth"
+    )
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+
+    hub_client.human_get_team_invitation("Bearer human.jwt")
+    hub_client.human_create_team_invitation("Bearer human.jwt", None)
+    hub_client.human_update_team_invitation("Bearer human.jwt", 3600)
+    hub_client.human_revoke_team_invitation("Bearer human.jwt")
+
+    assert [(method, url, payload) for method, url, payload, _ in calls] == [
+        ("GET", "https://team.example/human-auth/admin/team-invitation", None),
+        (
+            "POST",
+            "https://team.example/human-auth/admin/team-invitation",
+            {"expires_in": None},
+        ),
+        (
+            "PATCH",
+            "https://team.example/human-auth/admin/team-invitation",
+            {"expires_in": 3600},
+        ),
+        ("DELETE", "https://team.example/human-auth/admin/team-invitation", None),
+    ]
+
+
 def test_human_admin_route_rejects_readable_second_factor_file(monkeypatch, tmp_path):
     token_file = tmp_path / "admin-access-token"
     token_file.write_text(

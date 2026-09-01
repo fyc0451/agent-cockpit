@@ -671,6 +671,32 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
     )
     monkeypatch.setattr(
         server.hub_client,
+        "human_get_team_invitation",
+        lambda authorization: calls.append(("team-invite-get", authorization))
+        or {"invitation": None},
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_create_team_invitation",
+        lambda authorization, expires_in: calls.append(
+            ("team-invite-create", authorization, expires_in)
+        ) or {"invitation": {"invite_code": "team-code", "expires_at": None}},
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_update_team_invitation",
+        lambda authorization, expires_in: calls.append(
+            ("team-invite-update", authorization, expires_in)
+        ) or {"invitation": {"invite_code": "team-code", "expires_at": 123}},
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_revoke_team_invitation",
+        lambda authorization: calls.append(("team-invite-revoke", authorization))
+        or {"revoked": True},
+    )
+    monkeypatch.setattr(
+        server.hub_client,
         "human_set_user_status",
         lambda authorization, username, status: calls.append(
             ("status", authorization, username, status)
@@ -711,6 +737,22 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
         headers=headers,
         json={"expires_in": 3600},
     ).status_code == 201
+    assert client.get("/api/team-auth/team-invitation", headers=headers).json() == {
+        "invitation": None
+    }
+    assert client.post(
+        "/api/team-auth/team-invitation",
+        headers=headers,
+        json={"expires_in": None},
+    ).status_code == 201
+    assert client.patch(
+        "/api/team-auth/team-invitation",
+        headers=headers,
+        json={"expires_in": 3600},
+    ).status_code == 200
+    assert client.delete(
+        "/api/team-auth/team-invitation", headers=headers
+    ).json() == {"revoked": True}
     assert client.get("/api/team-auth/users", headers=headers).status_code == 200
     assert client.patch(
         "/api/team-auth/users/alice",
@@ -736,6 +778,10 @@ def test_team_auth_registration_and_admin_routes_use_http_only_session(monkeypat
             {"display_name": "fyc"},
         ),
         ("invite", "Bearer human.jwt", 3600, None),
+        ("team-invite-get", "Bearer human.jwt"),
+        ("team-invite-create", "Bearer human.jwt", None),
+        ("team-invite-update", "Bearer human.jwt", 3600),
+        ("team-invite-revoke", "Bearer human.jwt"),
         ("users", "Bearer human.jwt"),
         ("status", "Bearer human.jwt", "alice", "active"),
         ("password", "Bearer human.jwt", "new-password-1234"),

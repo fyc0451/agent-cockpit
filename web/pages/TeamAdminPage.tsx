@@ -9,12 +9,15 @@ import {
   approveTeamUser,
   createTeamInvitation,
   createTeamProject,
+  getTeamInvitation,
   listTeamMembers,
   listTeamProjects,
   listTeamUsers,
   patchTeamMember,
+  revokeTeamInvitation,
   setTeamUserStatus,
   teamAuthStatus,
+  updateTeamInvitation,
 } from '../api/teamAuth'
 import { routes } from '../app/routes'
 import { Button } from '../components/Button'
@@ -35,7 +38,7 @@ function memberStatusLabel(status: string): string {
   return status === 'invited' ? '待审批' : status === 'active' ? '已加入' : status === 'removed' ? '已移除' : status
 }
 
-/** 系统账号：一次性邀请码 + 审批 / 停用 / 恢复 */
+/** 系统账号：团队邀请链接 + 审批 / 停用 / 恢复 */
 function AccountSection({ currentUsername }: { currentUsername: string }) {
   const queryClient = useQueryClient()
   const usersQ = useQuery({
@@ -43,22 +46,40 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
     queryFn: listTeamUsers,
     refetchInterval: 5_000,
   })
-  const topicsQ = useQuery({
-    queryKey: ['team-projects'],
-    queryFn: listTeamProjects,
-    refetchInterval: 5_000,
+  const invitationQ = useQuery({
+    queryKey: ['team-invitation'],
+    queryFn: getTeamInvitation,
   })
-  const [selectedProject, setSelectedProject] = useState('')
-  const [inviteUrl, setInviteUrl] = useState('')
+  const [expiresIn, setExpiresIn] = useState('permanent')
   const [copyNote, setCopyNote] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const projectSlug = selectedProject || topicsQ.data?.[0]?.slug || ''
+  const invitation = invitationQ.data
+  const inviteUrl = invitation
+    ? `${window.location.origin}${window.location.pathname}#${routes.teamInvite(invitation.inviteCode)}`
+    : ''
+  const expiryValue = expiresIn === 'permanent' ? null : Number(expiresIn)
 
   const inviteM = useMutation({
-    mutationFn: createTeamInvitation,
-    onSuccess: (invitation) => {
-      const base = `${window.location.origin}${window.location.pathname}`
-      setInviteUrl(`${base}#${routes.teamInvite(invitation.inviteCode, invitation.projectSlug)}`)
+    mutationFn: () => createTeamInvitation(expiryValue),
+    onSuccess: (created) => {
+      queryClient.setQueryData(['team-invitation'], created)
+      setCopyNote(null)
+      setError(null)
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  })
+  const expiryM = useMutation({
+    mutationFn: () => updateTeamInvitation(expiryValue),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(['team-invitation'], updated)
+      setError(null)
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  })
+  const revokeM = useMutation({
+    mutationFn: revokeTeamInvitation,
+    onSuccess: () => {
+      queryClient.setQueryData(['team-invitation'], null)
       setCopyNote(null)
       setError(null)
     },
@@ -83,7 +104,7 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
     },
     onError: (e) => setError(e instanceof Error ? e.message : String(e)),
   })
-  const busy = inviteM.isPending || statusM.isPending || approveM.isPending
+  const busy = inviteM.isPending || expiryM.isPending || revokeM.isPending || statusM.isPending || approveM.isPending
 
   const copyInvitation = async () => {
     const copied = await writeBrowserClipboard(inviteUrl)
@@ -97,27 +118,49 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
   return (
     <section className="panel">
       <h2 className="panel-title">账号管理</h2>
-      <p className="list-sub">发送团队邀请链接；成员注册后一次批准即可激活账号并加入目标 topic。</p>
+      <p className="list-sub">全团队共用一个邀请链接，不绑定 Topic。成员注册并获批账号后，再申请加入需要的 Topic。</p>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '12px 0' }}>
         <select
-          aria-label="邀请加入 topic"
+          aria-label="邀请链接有效期"
           className="input"
-          value={projectSlug}
-          onChange={(e) => setSelectedProject(e.target.value)}
-          disabled={busy || !topicsQ.data?.length}
+          value={expiresIn}
+          onChange={(e) => setExpiresIn(e.target.value)}
+          disabled={busy}
         >
-          {(topicsQ.data ?? []).map((topic) => (
-            <option key={topic.slug} value={topic.slug}>{topic.name}</option>
-          ))}
+          <option value="permanent">永久有效</option>
+          <option value="1800">30 分钟</option>
+          <option value="3600">1 小时</option>
+          <option value="21600">6 小时</option>
+          <option value="86400">24 小时</option>
+          <option value="259200">3 天</option>
+          <option value="604800">7 天</option>
         </select>
         <Button
           variant="primary"
-          disabled={busy || !projectSlug}
-          onClick={() => inviteM.mutate(projectSlug)}
+          disabled={busy}
+          onClick={() => {
+            if (!invitation || window.confirm('重新生成后，旧团队邀请链接会立即失效。继续吗？')) {
+              inviteM.mutate()
+            }
+          }}
         >
-          {inviteM.isPending ? '生成中…' : '生成团队邀请链接'}
+          {inviteM.isPending ? '生成中…' : invitation ? '重新生成链接' : '生成团队邀请链接'}
         </Button>
+        {invitation && <Button disabled={busy} onClick={() => expiryM.mutate()}>更新有效期</Button>}
+        {invitation && (
+          <Button
+            disabled={busy}
+            onClick={() => {
+              if (window.confirm('撤销后，当前团队邀请链接会立即停止注册。继续吗？')) {
+                revokeM.mutate()
+              }
+            }}
+          >
+            撤销链接
+          </Button>
+        )}
       </div>
+      {invitationQ.isPending && <StatusState kind="loading" title="正在读取团队邀请链接…" />}
       {inviteUrl && (
         <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
           <label className="list-sub" htmlFor="team-invitation-url">已生成的团队邀请链接</label>
@@ -133,7 +176,11 @@ function AccountSection({ currentUsername }: { currentUsername: string }) {
           />
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <Button onClick={() => void copyInvitation()}>复制链接</Button>
-            <span className="list-sub">24 小时内有效，仅显示本次</span>
+            <span className="list-sub">
+              {invitation?.expiresAt
+                ? `有效至 ${new Date(invitation.expiresAt * 1000).toLocaleString()}，已使用 ${invitation.useCount} 次`
+                : `永久有效，已使用 ${invitation?.useCount ?? 0} 次`}
+            </span>
             {copyNote && <span role="status" className="list-sub">{copyNote}</span>}
           </div>
         </div>

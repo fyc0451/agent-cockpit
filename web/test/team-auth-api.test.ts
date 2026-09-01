@@ -152,31 +152,33 @@ describe('团队普通成员 API', () => {
     })
   })
 
-  it('项目邀请绑定目标 topic，一次批准走组合端点', async () => {
+  it('团队邀请不绑定 topic，默认永久有效，一次批准走组合端点', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({
         ok: true,
         status: 201,
-        json: async () => ({
-          invite_code: 'INVITE-CORE',
-          project_slug: 'core',
-          expires_at: 123,
-        }),
+        json: async () => ({ invitation: {
+          invite_code: 'INVITE-TEAM',
+          created_at: 123,
+          expires_at: null,
+          use_count: 2,
+        } }),
       } as Response)
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ ok: true }) } as Response)
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(createTeamInvitation('core')).resolves.toEqual({
-      inviteCode: 'INVITE-CORE',
-      projectSlug: 'core',
-      expiresAt: 123,
+    await expect(createTeamInvitation(null)).resolves.toEqual({
+      inviteCode: 'INVITE-TEAM',
+      createdAt: 123,
+      expiresAt: null,
+      useCount: 2,
     })
     await approveTeamUser('alice')
 
-    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/team-auth/invitations', {
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/team-auth/team-invitation', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expires_in: 86400, project_slug: 'core' }),
+      body: JSON.stringify({ expires_in: null }),
       credentials: 'include',
     })
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/team-auth/users/alice/approve-team', {

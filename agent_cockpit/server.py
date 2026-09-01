@@ -2249,6 +2249,10 @@ class HumanInvitationReq(BaseModel):
     project_slug: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class HumanTeamInvitationReq(BaseModel):
+    expires_in: int | None = Field(default=None, ge=300, le=7 * 24 * 60 * 60)
+
+
 class HumanUserStatusReq(BaseModel):
     status: str = Field(min_length=1, max_length=16)
 
@@ -6122,6 +6126,58 @@ def api_team_auth_create_invitation(req: HumanInvitationReq, request: Request):
     try:
         return hub_client.human_create_invitation(
             _team_human_authorization(request), req.expires_in, req.project_slug
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+
+
+@app.get("/api/team-auth/team-invitation")
+def api_team_auth_get_team_invitation(request: Request):
+    try:
+        return hub_client.human_get_team_invitation(
+            _team_human_authorization(request)
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+
+
+@app.post("/api/team-auth/team-invitation", status_code=201)
+def api_team_auth_create_team_invitation(
+    req: HumanTeamInvitationReq, request: Request
+):
+    try:
+        return hub_client.human_create_team_invitation(
+            _team_human_authorization(request), req.expires_in
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+
+
+@app.patch("/api/team-auth/team-invitation")
+def api_team_auth_update_team_invitation(
+    req: HumanTeamInvitationReq, request: Request
+):
+    try:
+        return hub_client.human_update_team_invitation(
+            _team_human_authorization(request), req.expires_in
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except hub_client.HumanAuthError as exc:
+        _raise_human_auth_error(exc)
+
+
+@app.delete("/api/team-auth/team-invitation")
+def api_team_auth_revoke_team_invitation(request: Request):
+    try:
+        return hub_client.human_revoke_team_invitation(
+            _team_human_authorization(request)
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

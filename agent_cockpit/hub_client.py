@@ -521,6 +521,40 @@ def human_create_invitation(
     )
 
 
+def human_get_team_invitation(authorization: str) -> dict[str, Any]:
+    return _human_auth_api(
+        "GET", "/admin/team-invitation", authorization=authorization
+    )
+
+
+def human_create_team_invitation(
+    authorization: str, expires_in: int | None
+) -> dict[str, Any]:
+    return _human_auth_api(
+        "POST",
+        "/admin/team-invitation",
+        authorization=authorization,
+        payload={"expires_in": expires_in},
+    )
+
+
+def human_update_team_invitation(
+    authorization: str, expires_in: int | None
+) -> dict[str, Any]:
+    return _human_auth_api(
+        "PATCH",
+        "/admin/team-invitation",
+        authorization=authorization,
+        payload={"expires_in": expires_in},
+    )
+
+
+def human_revoke_team_invitation(authorization: str) -> dict[str, Any]:
+    return _human_auth_api(
+        "DELETE", "/admin/team-invitation", authorization=authorization
+    )
+
+
 def human_list_users(authorization: str) -> dict[str, Any]:
     return _human_auth_api("GET", "/admin/users", authorization=authorization)
 

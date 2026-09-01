@@ -787,42 +787,64 @@ export async function approveTeamUser(username: string): Promise<void> {
   }
 }
 
-/** 生成绑定目标 topic 的一次性邀请（24h 有效，仅全局 admin）。 */
-export async function createTeamInvitation(projectSlug: string): Promise<{
+export interface TeamInvitation {
   inviteCode: string
-  projectSlug: string
-  expiresAt: number
-}> {
-  const response = await fetch('/api/team-auth/invitations', {
-    method: 'POST',
+  createdAt: number
+  expiresAt: number | null
+  useCount: number
+}
+
+async function teamInvitationRequest(
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  expiresIn?: number | null,
+): Promise<TeamInvitation | null> {
+  const response = await fetch('/api/team-auth/team-invitation', {
+    method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ expires_in: 86400, project_slug: projectSlug }),
+    body: method === 'POST' || method === 'PATCH'
+      ? JSON.stringify({ expires_in: expiresIn ?? null })
+      : undefined,
     credentials: 'include',
   })
   if (!response.ok) {
+    const text = await response.text()
     throw new ApiError({
       code: response.status === 403 ? 'forbidden' : 'invite_failed',
-      message: response.status === 403 ? '只有系统管理员可以生成邀请码' : '生成邀请码失败',
+      message: text || '团队邀请链接操作失败',
       retryable: false,
       status: response.status,
     })
   }
   const data = await response.json()
+  if (method === 'DELETE') return null
+  const invitation = isObj(data) && isObj(data.invitation) ? data.invitation : null
+  if (invitation === null && method === 'GET') return null
   if (
-    !isObj(data)
-    || typeof data.invite_code !== 'string'
-    || !data.invite_code
-    || typeof data.project_slug !== 'string'
-    || !data.project_slug
+    !invitation
+    || typeof invitation.invite_code !== 'string'
+    || !invitation.invite_code
   ) {
     throw new ApiError({ code: 'protocol_error', message: '邀请码响应格式错误', retryable: false })
   }
   return {
-    inviteCode: data.invite_code,
-    projectSlug: data.project_slug,
-    expiresAt: typeof data.expires_at === 'number' ? data.expires_at : 0,
+    inviteCode: invitation.invite_code,
+    createdAt: typeof invitation.created_at === 'number' ? invitation.created_at : 0,
+    expiresAt: typeof invitation.expires_at === 'number' ? invitation.expires_at : null,
+    useCount: typeof invitation.use_count === 'number' ? invitation.use_count : 0,
   }
 }
+
+export const getTeamInvitation = (): Promise<TeamInvitation | null> =>
+  teamInvitationRequest('GET')
+
+export const createTeamInvitation = (expiresIn: number | null): Promise<TeamInvitation> =>
+  teamInvitationRequest('POST', expiresIn) as Promise<TeamInvitation>
+
+export const updateTeamInvitation = (expiresIn: number | null): Promise<TeamInvitation> =>
+  teamInvitationRequest('PATCH', expiresIn) as Promise<TeamInvitation>
+
+export const revokeTeamInvitation = (): Promise<TeamInvitation | null> =>
+  teamInvitationRequest('DELETE')
 
 function parseTeamMember(raw: unknown): TeamMember | null {
   if (!isObj(raw)) return null

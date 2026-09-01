@@ -490,7 +490,7 @@ function TeamZoneSection({
     )
     const inviteCode = params.get('team_invite')?.trim() ?? ''
     const projectSlug = params.get('team_project')?.trim() ?? ''
-    return inviteCode && projectSlug ? { inviteCode, projectSlug } : null
+    return inviteCode ? { inviteCode, projectSlug: projectSlug || null } : null
   }, [])
   const [authMode, setAuthMode] = useState<'idle' | 'login' | 'register'>(
     linkedInvite ? 'register' : 'idle',
@@ -563,9 +563,9 @@ function TeamZoneSection({
     try {
       await onRegister({ username, displayName, password: registerPassword, inviteCode })
       setRegistrationNotice(
-        linkedInvite
+        linkedInvite?.projectSlug
           ? `账号 ${username} 已提交加入 ${linkedInvite.projectSlug}；管理员一次批准后即可登录。`
-          : `账号 ${username} 已提交，当前为待批准；管理员批准后即可登录。`,
+          : `账号 ${username} 已提交，当前为待批准；管理员批准后即可登录并申请加入 Topic。`,
       )
       setRegisterUsername('')
       setRegisterDisplayName('')
@@ -702,12 +702,12 @@ function TeamZoneSection({
           <form style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '0 8px' }} onSubmit={handleRegister}>
             {linkedInvite && (
               <div style={{ color: 'var(--dsw-alias-state-success-primary)', fontSize: '12px' }}>
-                受邀加入 {linkedInvite.projectSlug}
+                {linkedInvite.projectSlug ? `受邀加入 ${linkedInvite.projectSlug}` : '团队账号邀请'}
               </div>
             )}
             <input aria-label="注册用户名" placeholder="用户名" value={registerUsername} onChange={(e) => setRegisterUsername(e.target.value)} disabled={registerLoading} autoComplete="username" style={compactInputStyle} />
             <input aria-label="注册显示名" placeholder="显示名" value={registerDisplayName} onChange={(e) => setRegisterDisplayName(e.target.value)} disabled={registerLoading} autoComplete="name" style={compactInputStyle} />
-            <input aria-label="团队邀请码" placeholder="一次性邀请码" value={registerInvite} onChange={(e) => setRegisterInvite(e.target.value)} disabled={registerLoading} readOnly={!!linkedInvite} autoComplete="off" style={compactInputStyle} />
+            <input aria-label="团队邀请码" placeholder="团队邀请码" value={registerInvite} onChange={(e) => setRegisterInvite(e.target.value)} disabled={registerLoading} readOnly={!!linkedInvite} autoComplete="off" style={compactInputStyle} />
             <input aria-label="注册密码" type="password" placeholder="密码（至少 12 字节）" value={registerPassword} onChange={(e) => setRegisterPassword(e.target.value)} disabled={registerLoading} autoComplete="new-password" style={compactInputStyle} />
             <input aria-label="确认注册密码" type="password" placeholder="确认密码" value={registerConfirm} onChange={(e) => setRegisterConfirm(e.target.value)} disabled={registerLoading} autoComplete="new-password" style={compactInputStyle} />
             {registerError && <div style={{ color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px' }}>{registerError}</div>}
