@@ -98,6 +98,7 @@ def test_create_workspace_binds_existing_sessions(isolated_ledger, monkeypatch):
         server.herdr_client,
         "list_sessions",
         lambda: [
+            {"name": "default", "status": "stopped", "directory": "/tmp/herdr-default"},
             {"name": "app-1", "status": "running", "directory": "/tmp/herdr-app-1"},
             {"name": "nested-1", "status": "stopped", "directory": "/tmp/herdr-nested"},
             {"name": "other", "status": "running", "directory": "/tmp/herdr-other"},
@@ -107,6 +108,7 @@ def test_create_workspace_binds_existing_sessions(isolated_ledger, monkeypatch):
         server,
         "_chat_session_workdir",
         lambda name: {
+            "default": proj,
             "app-1": proj,
             "nested-1": nested,
             "other": isolated_ledger / "elsewhere",
@@ -120,6 +122,35 @@ def test_create_workspace_binds_existing_sessions(isolated_ledger, monkeypatch):
     assert created.status_code == 200
     names = sorted(row["herdr_session"] for row in created.json()["threads"])
     assert names == ["app-1", "nested-1"]
+
+
+def test_workspace_reads_hide_legacy_default_thread(isolated_ledger, monkeypatch):
+    proj = isolated_ledger / "app"
+    proj.mkdir()
+    workspace = chat_ledger.create_workspace(str(proj), "App")
+    chat_ledger.create_thread(workspace["id"], "default")
+    chat_ledger.create_thread(workspace["id"], "app-1")
+    monkeypatch.setattr(server.team_sessions, "managed_session_names", lambda: set())
+
+    client = _client()
+    listed = client.get("/api/chat/workspaces", headers=_headers())
+    assert listed.status_code == 200
+    assert [row["herdr_session"] for row in listed.json()["threads"]] == ["app-1"]
+    assert [
+        row["herdr_session"] for row in listed.json()["workspaces"][0]["threads"]
+    ] == ["app-1"]
+
+    detail = client.get(
+        f"/api/chat/workspaces/{workspace['id']}", headers=_headers(),
+    )
+    assert detail.status_code == 200
+    assert [row["herdr_session"] for row in detail.json()["threads"]] == ["app-1"]
+
+    threads = client.get(
+        f"/api/chat/workspaces/{workspace['id']}/threads", headers=_headers(),
+    )
+    assert threads.status_code == 200
+    assert [row["herdr_session"] for row in threads.json()["threads"]] == ["app-1"]
 
 
 def test_herdr_state_directory_is_not_a_project_root(isolated_ledger, monkeypatch):
@@ -172,6 +203,7 @@ def test_thread_bind_and_candidates(isolated_ledger, monkeypatch):
         server.herdr_client,
         "list_sessions",
         lambda: [
+            {"name": "default", "status": "stopped", "directory": "/tmp/herdr-default"},
             {"name": "app-1", "status": "running", "directory": "/tmp/herdr-app-1"},
             {"name": "other", "status": "stopped", "directory": "/tmp/herdr-other"},
         ],
@@ -179,7 +211,7 @@ def test_thread_bind_and_candidates(isolated_ledger, monkeypatch):
     monkeypatch.setattr(
         server,
         "_chat_session_workdir",
-        lambda name: proj if name == "app-1" else isolated_ledger / "elsewhere",
+        lambda name: proj if name in {"default", "app-1"} else isolated_ledger / "elsewhere",
     )
 
     detail = client.get(f"/api/chat/workspaces/{ws['id']}", headers=_headers())
@@ -203,6 +235,20 @@ def test_thread_bind_and_candidates(isolated_ledger, monkeypatch):
     after = client.get(f"/api/chat/workspaces/{ws['id']}", headers=_headers())
     assert after.json()["candidates"] == []
     assert after.json()["threads"][0]["herdr_session"] == "app-1"
+
+    reserved_thread = client.post(
+        f"/api/chat/workspaces/{ws['id']}/threads",
+        headers=_headers(),
+        json={"herdr_session": "default"},
+    )
+    reserved_bind = client.post(
+        f"/api/chat/workspaces/{ws['id']}/bind",
+        headers=_headers(),
+        json={"herdr_session": "default"},
+    )
+    assert reserved_thread.status_code == reserved_bind.status_code == 400
+    assert reserved_thread.json()["detail"] == "默认会话不能绑定到工作区"
+    assert reserved_bind.json()["detail"] == "默认会话不能绑定到工作区"
 
     gone = client.post(
         f"/api/chat/workspaces/ws_{'0' * 12}/threads",

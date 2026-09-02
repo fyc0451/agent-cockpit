@@ -6427,7 +6427,7 @@ def _bind_matching_sessions(workspace: dict[str, Any]) -> list[dict[str, Any]]:
     bound: list[dict[str, Any]] = []
     for rec in herdr_client.list_sessions():
         name = str(rec.get("name") or "")
-        if not name:
+        if not name or name == "default":
             continue
         existing = chat_ledger.get_thread_by_session(name)
         if existing is not None:
@@ -8787,7 +8787,7 @@ def _chat_bind_candidates(workspace: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for rec in herdr_client.list_sessions():
         name = str(rec.get("name") or "")
-        if not name or name in bound:
+        if not name or name == "default" or name in bound:
             continue
         if not _session_matches_workspace(name, target):
             continue
@@ -8807,7 +8807,8 @@ def api_chat_workspaces():
         managed_sessions = team_sessions.managed_session_names()
         threads = [
             row for row in chat_ledger.list_threads()
-            if row.get("herdr_session") not in managed_sessions
+            if row.get("herdr_session") != "default"
+            and row.get("herdr_session") not in managed_sessions
         ]
     except (OSError, ValueError) as exc:
         raise HTTPException(500, str(exc)) from exc
@@ -8840,7 +8841,10 @@ def api_chat_workspace_get(workspace_id: str):
         raise HTTPException(404, "工作区不存在")
     return {
         **row,
-        "threads": chat_ledger.list_threads(workspace_id),
+        "threads": [
+            thread for thread in chat_ledger.list_threads(workspace_id)
+            if thread.get("herdr_session") != "default"
+        ],
         "candidates": _chat_bind_candidates(row),
     }
 
@@ -8857,12 +8861,19 @@ def api_chat_workspace_delete(workspace_id: str):
 def api_chat_workspace_threads(workspace_id: str):
     if chat_ledger.get_workspace(workspace_id) is None:
         raise HTTPException(404, "工作区不存在")
-    return {"threads": chat_ledger.list_threads(workspace_id)}
+    return {
+        "threads": [
+            thread for thread in chat_ledger.list_threads(workspace_id)
+            if thread.get("herdr_session") != "default"
+        ],
+    }
 
 
 @app.post("/api/chat/workspaces/{workspace_id}/threads")
 def api_chat_thread_create(workspace_id: str, req: ChatThreadCreateReq):
     """绑定一条群聊到 herdr session。同 session 名幂等。"""
+    if req.herdr_session == "default":
+        raise HTTPException(400, "默认会话不能绑定到工作区")
     try:
         return chat_ledger.create_thread(workspace_id, req.herdr_session, req.title)
     except ValueError as exc:
@@ -9026,6 +9037,8 @@ def _chat_workspace(workspace_id: str) -> dict[str, Any]:
 def api_chat_workspace_bind(workspace_id: str, req: ChatThreadCreateReq):
     """显式绑定已有 herdr，不创建、不启动。"""
     workspace = _chat_workspace(workspace_id)
+    if req.herdr_session == "default":
+        raise HTTPException(400, "默认会话不能绑定到工作区")
     try:
         thread = chat_ledger.create_thread(workspace_id, req.herdr_session, req.title)
     except ValueError as exc:
@@ -9043,7 +9056,10 @@ def api_chat_workspace_open(workspace_id: str):
     workspace = _chat_workspace(workspace_id)
     bound = _bind_matching_sessions(workspace)
     threads = sorted(
-        chat_ledger.list_threads(workspace_id),
+        (
+            row for row in chat_ledger.list_threads(workspace_id)
+            if row.get("herdr_session") != "default"
+        ),
         key=lambda row: row["created_at"],
         reverse=True,
     )
