@@ -282,6 +282,13 @@ export interface SessionMailMessage {
   direct?: boolean
 }
 
+const SESSION_MAIL_WINDOW = 200
+
+function trimSessionMailWindow(rows: SessionMailMessage[]): SessionMailMessage[] {
+  if (rows.length <= SESSION_MAIL_WINDOW) return rows
+  return rows.slice(-SESSION_MAIL_WINDOW)
+}
+
 export function mailBelongsToSession(thread: string, session: string): boolean {
   return Boolean(session && thread && thread === session)
 }
@@ -363,7 +370,7 @@ export function applyMailStreamEvent(
       const parsed = parseSessionMailRow(row, session)
       return parsed ? [parsed] : []
     })
-    return preferLedgerMail(prev, incoming)
+    return trimSessionMailWindow(preferLedgerMail(prev, incoming))
   }
   if (event === 'replace' || event === 'receipt') {
     if (!isObj(payload) || typeof payload.id !== 'string' || !payload.id) return prev
@@ -388,9 +395,15 @@ export function applyMailStreamEvent(
   if (!row) return prev
   if (event === 'message') {
     if (prev.some((item) => item.id === row.id)) {
-      return prev.map((item) => (item.id === row.id ? { ...item, ...row } : item))
+      return trimSessionMailWindow(
+        prev.map((item) => (item.id === row.id ? { ...item, ...row } : item)),
+      )
     }
-    return [...prev, row].sort((a, b) => (a.ts !== b.ts ? a.ts - b.ts : a.id.localeCompare(b.id)))
+    return trimSessionMailWindow(
+      [...prev, row].sort((a, b) => (
+        a.ts !== b.ts ? a.ts - b.ts : a.id.localeCompare(b.id)
+      )),
+    )
   }
   return prev
 }

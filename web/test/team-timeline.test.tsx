@@ -197,7 +197,7 @@ describe('TeamTimeline', () => {
     expect(screen.queryByRole('option', { name: /@member-1$/ })).not.toBeInTheDocument()
   })
 
-  it('每两秒自动拉取新团队回复', async () => {
+  it('前台每五秒自动拉取新团队回复', async () => {
     vi.useFakeTimers()
     let poll = 0
     vi.stubGlobal('fetch', vi.fn(async () => ({
@@ -209,7 +209,7 @@ describe('TeamTimeline', () => {
     render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(screen.getByText(/还没有团队消息/)).toBeInTheDocument()
-    await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(6_000) })
     expect(screen.getByText('自动出现的回复')).toBeInTheDocument()
   })
 
@@ -330,7 +330,7 @@ describe('TeamTimeline', () => {
       list.scrollTop = 100
       fireEvent.scroll(list)
       height.current = 2000
-      await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(6_000) })
       expect(screen.getByText('新消息')).toBeInTheDocument()
       expect(list.scrollTop).toBe(100)
       fireEvent.click(screen.getByRole('button', { name: '↓ 有新消息' }))
@@ -531,6 +531,45 @@ describe('TeamTimeline', () => {
 
     const reply = await screen.findByText('没有匹配原问题的回复')
     expect(reply.closest('details')).toBeNull()
+  })
+
+  it('首屏只取最近消息，并可用游标向上加载且不重复', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/team/projects/proj-a/chat/messages') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            messages: [message(3, '较新消息'), message(4, '最新消息')],
+            has_more: true,
+            next_before_id: 3,
+          }),
+        } as Response
+      }
+      if (url === '/api/team/projects/proj-a/chat/messages?limit=80&before_id=3') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            messages: [message(1, '最早消息'), message(2, '较早消息'), message(3, '重复边界')],
+            has_more: false,
+            next_before_id: null,
+          }),
+        } as Response
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
+
+    expect(await screen.findByText('最新消息')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '加载更早消息' }))
+    expect(await screen.findByText('最早消息')).toBeInTheDocument()
+    expect(screen.getAllByTestId('team-msg-3')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: '加载更早消息' })).not.toBeInTheDocument()
   })
 
   it('API 只暴露 Team Hub 群聊读写', () => {

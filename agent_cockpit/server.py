@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import Body, FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -3951,6 +3951,27 @@ async def api_team_proxy(route: str, request: Request):
     if not token or len(token) > 8192:
         raise HTTPException(401, "需要有效的 Hub Human JWT")
     authorization = f"Bearer {token}"
+    upstream_path = f"/hub/api/{normalized}"
+    query_items = list(request.query_params.multi_items())
+    if query_items:
+        messages_route = re.fullmatch(
+            r"projects/[A-Za-z0-9_-]+/chat/messages", normalized,
+        )
+        if method != "GET" or messages_route is None:
+            raise HTTPException(400, "该 Team API 不接受查询参数")
+        if len({key for key, _value in query_items}) != len(query_items):
+            raise HTTPException(400, "Team 消息分页参数不能重复")
+        parsed_query: list[tuple[str, str]] = []
+        for key, value in query_items:
+            if key not in {"limit", "before_id"} or not re.fullmatch(r"[0-9]+", value):
+                raise HTTPException(400, "Team 消息分页参数无效")
+            number = int(value)
+            if key == "limit" and not 1 <= number <= 200:
+                raise HTTPException(400, "limit 必须在 1 到 200 之间")
+            if key == "before_id" and number < 1:
+                raise HTTPException(400, "before_id 必须是正整数")
+            parsed_query.append((key, str(number)))
+        upstream_path = f"{upstream_path}?{urlencode(parsed_query)}"
     payload = None
     if method != "GET":
         try:
@@ -3978,7 +3999,7 @@ async def api_team_proxy(route: str, request: Request):
                 raise HTTPException(409, f"已存在同名 topic「{name}」，请换一个名字")
         result = hub_client.human_api(
             method,
-            f"/hub/api/{normalized}",
+            upstream_path,
             authorization,
             payload,
         )

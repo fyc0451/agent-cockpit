@@ -28,6 +28,12 @@ export interface TeamMessage {
   } | null
 }
 
+export interface TeamMessagePage {
+  messages: TeamMessage[]
+  hasMore: boolean
+  nextBeforeId: number | null
+}
+
 function parseReplyEvidence(raw: unknown): TeamMessage['replyEvidence'] {
   if (!isObj(raw)) return null
   if (
@@ -92,9 +98,19 @@ async function readError(response: Response, fallback: string): Promise<string> 
   return fallback
 }
 
-export async function listTeamMessages(topic: string): Promise<TeamMessage[]> {
+export async function listTeamMessages(
+  topic: string,
+  options?: { beforeId?: number; limit?: number },
+): Promise<TeamMessagePage> {
+  const params = new URLSearchParams()
+  if (options) {
+    const limit = options.limit ?? 80
+    params.set('limit', String(limit))
+    if (options.beforeId !== undefined) params.set('before_id', String(options.beforeId))
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : ''
   const response = await fetch(
-    `/api/team/projects/${encodeURIComponent(topic)}/chat/messages`,
+    `/api/team/projects/${encodeURIComponent(topic)}/chat/messages${query}`,
     { credentials: 'include' },
   )
   if (!response.ok) {
@@ -107,7 +123,13 @@ export async function listTeamMessages(topic: string): Promise<TeamMessage[]> {
   }
   const data = await response.json()
   const rows = isObj(data) && Array.isArray(data.messages) ? data.messages : []
-  return rows.map(parseMessage).filter((row): row is TeamMessage => row !== null)
+  const messages = rows.map(parseMessage).filter((row): row is TeamMessage => row !== null)
+  const hasMore = isObj(data) && data.has_more === true
+  const upstreamCursor = isObj(data) ? data.next_before_id : null
+  const nextBeforeId = typeof upstreamCursor === 'number' && upstreamCursor > 0
+    ? upstreamCursor
+    : (hasMore && messages.length > 0 ? messages[0].id : null)
+  return { messages, hasMore, nextBeforeId }
 }
 
 export async function sendTeamMessage(

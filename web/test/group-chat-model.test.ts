@@ -943,6 +943,29 @@ describe('mailToEntries', () => {
     expect(next.map((row) => row.id)).toEqual(['msg_old', 'msg_2', 'msg_3'])
   })
 
+  it('账本 SSE 长时间运行只保留最近 200 条消息', () => {
+    const snapshot = applyMailStreamEvent(undefined, 'snapshot', JSON.stringify({
+      messages: Array.from({ length: 220 }, (_, index) => ({
+        id: `msg_${index + 1}`,
+        sender: 'human',
+        text: `消息 ${index + 1}`,
+        to: ['BrownDesert'],
+        thread: 'cockpit',
+        ts: index + 1,
+      })),
+    }), 'cockpit')
+    expect(snapshot).toHaveLength(200)
+    expect(snapshot[0]?.id).toBe('msg_21')
+
+    const next = applyMailStreamEvent(snapshot, 'message', JSON.stringify({
+      id: 'msg_221', sender: 'human', text: '最新消息',
+      to: ['BrownDesert'], thread: 'cockpit', ts: 221,
+    }), 'cockpit')
+    expect(next).toHaveLength(200)
+    expect(next[0]?.id).toBe('msg_22')
+    expect(next[next.length - 1]?.id).toBe('msg_221')
+  })
+
   it('preferLedgerMail 保住账本气泡，不被缺 thread 的第二次 /mail 擦掉', () => {
     const ledger = [{
       id: 'msg_keep', sender: 'BrownDesert', program: 'grok',

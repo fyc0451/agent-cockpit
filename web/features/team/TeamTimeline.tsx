@@ -114,8 +114,8 @@ export function TeamTimeline({
     queryKey: ['team-chat', topic],
     queryFn: () => listTeamMessages(topic),
     enabled: topic.length > 0,
-    refetchInterval: 2_000,
-    refetchIntervalInBackground: true,
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
   })
   const requestsQ = useQuery({
@@ -123,7 +123,7 @@ export function TeamTimeline({
     queryFn: () => listTeamReplyRequests(topic),
     enabled: topic.length > 0 && binding != null,
     refetchInterval: 2_000,
-    refetchIntervalInBackground: true,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
   })
   const decisionM = useMutation({
@@ -149,11 +149,17 @@ export function TeamTimeline({
   const [activeMentionIndex, setActiveMentionIndex] = useState(0)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  const [olderRows, setOlderRows] = useState<TeamMessage[]>([])
+  const [olderCursor, setOlderCursor] = useState<number | null>(null)
+  const [olderHasMore, setOlderHasMore] = useState<boolean | null>(null)
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [olderError, setOlderError] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const listContentRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const pendingCaretRef = useRef<number | null>(null)
   const nearBottomRef = useRef(true)
+  const pendingPrependRef = useRef<{ height: number; top: number } | null>(null)
   const [hasNew, setHasNew] = useState(false)
   const currentHandle = membership?.mention_handle.toLowerCase() ?? ''
   const canBroadcast = membership?.role === 'admin'
@@ -186,6 +192,10 @@ export function TeamTimeline({
     setSelectedHandles([])
     setBroadcast(false)
     setMention(null)
+    setOlderRows([])
+    setOlderCursor(null)
+    setOlderHasMore(null)
+    setOlderError(null)
   }, [topic])
 
   useEffect(() => {
@@ -265,7 +275,16 @@ export function TeamTimeline({
     }
   }
 
-  const rows = messagesQ.data ?? []
+  const latestPage = messagesQ.data
+  const rowsById = new Map<number, TeamMessage>()
+  for (const row of [...olderRows, ...(latestPage?.messages ?? [])]) {
+    rowsById.set(row.id, row)
+  }
+  const rows = [...rowsById.values()].sort((left, right) => left.id - right.id)
+  const hasOlder = olderHasMore ?? latestPage?.hasMore ?? false
+  const nextBeforeId = olderHasMore === null
+    ? latestPage?.nextBeforeId ?? null
+    : olderCursor
   const historyKey = rows.map((row) => row.id).join('|')
   const replyQuestions = matchReplyQuestions(rows)
   const replyRequests = new Map(
@@ -296,6 +315,30 @@ export function TeamTimeline({
     if (near) setHasNew(false)
   }
 
+  const loadOlder = async () => {
+    const list = listRef.current
+    if (!list || !hasOlder || nextBeforeId === null || loadingOlder) return
+    pendingPrependRef.current = { height: list.scrollHeight, top: list.scrollTop }
+    nearBottomRef.current = false
+    setLoadingOlder(true)
+    setOlderError(null)
+    try {
+      const page = await listTeamMessages(topic, { limit: 80, beforeId: nextBeforeId })
+      setOlderRows((current) => {
+        const merged = new Map<number, TeamMessage>()
+        for (const row of [...page.messages, ...current]) merged.set(row.id, row)
+        return [...merged.values()].sort((left, right) => left.id - right.id)
+      })
+      setOlderCursor(page.nextBeforeId)
+      setOlderHasMore(page.hasMore)
+    } catch (error) {
+      pendingPrependRef.current = null
+      setOlderError(error instanceof ApiError ? error.message : String(error))
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
+
   useLayoutEffect(() => {
     nearBottomRef.current = true
     setHasNew(false)
@@ -303,6 +346,13 @@ export function TeamTimeline({
   }, [topic])
 
   useLayoutEffect(() => {
+    const pending = pendingPrependRef.current
+    const list = listRef.current
+    if (pending && list) {
+      pendingPrependRef.current = null
+      list.scrollTop = pending.top + (list.scrollHeight - pending.height)
+      return
+    }
     if (nearBottomRef.current) pinToBottom()
     else if (historyKey) setHasNew(true)
   }, [historyKey])
@@ -348,6 +398,17 @@ export function TeamTimeline({
       )}
       <div className="gc-team-timeline-list" ref={listRef} onScroll={onScroll}>
         <div className="gc-team-timeline-list-inner" ref={listContentRef}>
+          {hasOlder && (
+            <button
+              type="button"
+              className="gc-team-load-older"
+              disabled={loadingOlder}
+              onClick={() => void loadOlder()}
+            >
+              {loadingOlder ? '正在加载…' : '加载更早消息'}
+            </button>
+          )}
+          {olderError && <div className="gc-event">加载更早消息失败：{olderError}</div>}
           {rows.length === 0 && !messagesQ.isPending && (
             <div className="gc-event">还没有团队消息。发一条试试。</div>
           )}

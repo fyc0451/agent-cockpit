@@ -382,6 +382,18 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         headers=headers,
     ).status_code == 200
     assert client.get(
+        "/api/team/projects/demo/chat/messages?limit=80&before_id=123",
+        headers=headers,
+    ).status_code == 200
+    assert client.get(
+        "/api/team/projects/demo/chat/messages?limit=201",
+        headers=headers,
+    ).status_code == 400
+    assert client.get(
+        "/api/team/projects/demo/chat/messages?unexpected=1",
+        headers=headers,
+    ).status_code == 400
+    assert client.get(
         "/api/team/projects/demo/reply-requests",
         headers=headers,
     ).status_code == 200
@@ -431,6 +443,12 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         (
             "GET",
             "/hub/api/projects/demo/chat/messages",
+            "Bearer human.jwt",
+            None,
+        ),
+        (
+            "GET",
+            "/hub/api/projects/demo/chat/messages?limit=80&before_id=123",
             "Bearer human.jwt",
             None,
         ),
