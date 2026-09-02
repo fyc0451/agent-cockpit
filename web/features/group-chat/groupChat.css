@@ -2901,6 +2901,111 @@
   word-break: break-word;
 }
 
+.gc-team-message-attachments,
+.gc-team-pending-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.gc-team-message-attachments a,
+.gc-team-pending-attachments button {
+  max-width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--gc-line);
+  border-radius: 6px;
+  background: var(--gc-bg);
+  color: var(--gc-accent-text);
+  font-size: 12px;
+  overflow: hidden;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gc-team-pending-attachments {
+  flex: none;
+  margin-top: 0;
+}
+
+.gc-team-pending-attachments button {
+  cursor: pointer;
+}
+
+.gc-team-pending-attachments button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.gc-team-local-handoff {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--gc-line);
+}
+
+.gc-team-local-handoff > button,
+.gc-team-local-handoff-done button {
+  padding: 5px 9px;
+  border: 1px solid var(--gc-accent);
+  border-radius: 6px;
+  background: var(--gc-bg);
+  color: var(--gc-accent-text);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.gc-team-local-handoff-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--gc-text3);
+  font-size: 12px;
+}
+
+.gc-team-local-handoff-form > strong {
+  color: var(--gc-text);
+}
+
+.gc-team-local-handoff-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gc-team-local-handoff-form select,
+.gc-team-local-handoff-form textarea {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--gc-line);
+  border-radius: 6px;
+  background: var(--gc-bg);
+  color: var(--gc-text);
+  font: inherit;
+  resize: vertical;
+}
+
+.gc-team-local-handoff-form textarea {
+  min-height: 64px;
+}
+
+.gc-team-local-handoff-done {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--gc-text2);
+  font-size: 12px;
+}
+
+.gc-team-attach-button {
+  flex: 0 0 auto;
+  border: 1px solid var(--gc-line) !important;
+  background: var(--gc-bg) !important;
+  color: var(--gc-text2) !important;
+}
+
 .gc-team-reply-evidence {
   display: flex;
   flex-wrap: wrap;

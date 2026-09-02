@@ -1343,7 +1343,11 @@ export function GroupChatPage() {
                 ?? null
               }
               members={teamMembersWithAgents}
+              consultTargets={(teamBindingsQ.data?.consultTargets ?? []).filter(
+                (target) => target.projectRef === activeTeamBinding?.projectRef,
+              )}
               mentionRequest={teamMentionRequest}
+              onOpenLocalSession={selectSession}
             />
           ) : previewFile && activeSession ? (
             <FilePreview

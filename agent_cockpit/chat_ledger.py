@@ -770,6 +770,22 @@ def append_message(
     return dict(row)
 
 
+def message_by_source(session: str, source: str) -> dict[str, Any] | None:
+    """Return one locally-authored message for a stable integration source."""
+    if not isinstance(session, str) or not _SESSION_RE.fullmatch(session):
+        raise ValueError("herdr_session 无效")
+    if not isinstance(source, str) or not source or len(source) > 32:
+        raise ValueError("群聊消息来源无效")
+    with _lock:
+        with _database() as connection:
+            record = connection.execute(
+                f"{_MESSAGE_SELECT} WHERE session = ? AND source = ? "
+                "ORDER BY ts, id LIMIT 1",
+                (session, source),
+            ).fetchone()
+    return _message_from_record(record) if record is not None else None
+
+
 def replace_message_text(message_id: str, text: str) -> dict[str, Any] | None:
     """同一条 agent 结论变长时原地改正文，不另开气泡。"""
     if not isinstance(message_id, str) or not re.fullmatch(r"msg_[0-9a-f]{12}", message_id):

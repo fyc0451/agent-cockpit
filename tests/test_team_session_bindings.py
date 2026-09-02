@@ -1127,6 +1127,146 @@ def test_managed_runtime_never_appears_in_ordinary_session_read_model(monkeypatc
     ] == ["daily-1"]
 
 
+def test_human_local_handoff_only_delivers_explicit_scope_and_is_idempotent(
+    monkeypatch,
+):
+    client, headers = _prepare(monkeypatch)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    team_sessions.bind(
+        hub=HUB,
+        human_id=7,
+        project_slug="demo",
+        session="team-demo-1",
+        session_generation="team-run-1",
+        session_dir=PROJECT_KEY,
+        mail_project=PROJECT_KEY,
+        lead={"agent": "codex", "mail_name": "team-main"},
+        client_session_id="team-client-1",
+        agent_id=41,
+        reply_token="reply-secret",
+        managed_runtime=True,
+        auth_expires_at=time.time() + 3600,
+    )
+    candidates = [{
+        "session": "dev-demo",
+        "generation": "dev-run-1",
+        "mail_project": PROJECT_KEY,
+        "ready": True,
+        "status": "idle",
+        "lead": {
+            "agent": "codex",
+            "mail_name": "dev-main",
+            "pane_id": "w1:p3",
+            "status": "idle",
+        },
+    }]
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: candidates)
+    monkeypatch.setattr(
+        server.team_sessions,
+        "is_managed_session",
+        lambda session, _generation="": session.startswith("team-"),
+    )
+    saved_messages = []
+    notified = []
+
+    def message_by_source(_session, _source):
+        return saved_messages[0] if saved_messages else None
+
+    def append_message(session, **payload):
+        row = {"id": "msg_123456789abc", "session": session, **payload}
+        saved_messages.append(row)
+        return row
+
+    monkeypatch.setattr(server.chat_ledger, "message_by_source", message_by_source)
+    monkeypatch.setattr(server.chat_ledger, "append_message", append_message)
+    monkeypatch.setattr(
+        server,
+        "_notify_team_lead_work",
+        lambda session, pane, text: (
+            notified.append((session, pane, text)) or True
+        ),
+    )
+    body = {
+        "request_id": "0123456789abcdef",
+        "message_id": 91,
+        "target_session": "dev-demo",
+        "scope": "只修复登录按钮并运行相关测试",
+        "acceptance": "登录测试通过",
+    }
+
+    first = client.post(
+        "/api/team-auth/projects/demo/local-handoffs", headers=headers, json=body,
+    )
+    replay = client.post(
+        "/api/team-auth/projects/demo/local-handoffs", headers=headers, json=body,
+    )
+
+    assert first.status_code == replay.status_code == 200
+    assert first.json()["idempotent"] is False
+    assert replay.json()["idempotent"] is True
+    assert len(saved_messages) == len(notified) == 1
+    task = saved_messages[0]["text"]
+    assert "只修复登录按钮并运行相关测试" in task
+    assert "登录测试通过" in task
+    assert "来源消息 ID：91" in task
+    assert "Team 消息正文未注入" in task
+    assert saved_messages[0]["to"] == ["dev-main"]
+    assert saved_messages[0]["notified_to"] == ["dev-main"]
+    assert saved_messages[0]["direct"] is True
+
+
+def test_team_attachment_proxy_preserves_auth_and_forces_download(monkeypatch):
+    client, headers = _prepare(monkeypatch)
+    monkeypatch.setattr(server.hub_client, "human_api", _human_api())
+    attachment_id = "a" * 32
+    uploads = []
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_attachment_upload",
+        lambda path, authorization, **kwargs: (
+            uploads.append((path, authorization, kwargs))
+            or {
+                "id": attachment_id,
+                "filename": "说明.md",
+                "media_type": "text/markdown",
+                "size": len(kwargs["content"]),
+                "sha256": "b" * 64,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        server.hub_client,
+        "human_attachment_download",
+        lambda _path, _authorization: (
+            "中文内容".encode(),
+            "text/markdown",
+            "attachment; filename*=utf-8''%E8%AF%B4%E6%98%8E.md",
+        ),
+    )
+
+    uploaded = client.post(
+        "/api/team-auth/projects/demo/attachments",
+        headers=headers,
+        files={"file": ("说明.md", "中文内容".encode(), "text/markdown")},
+    )
+    downloaded = client.get(
+        f"/api/team-auth/projects/demo/attachments/{attachment_id}",
+        headers=headers,
+    )
+
+    assert uploaded.status_code == 200
+    assert uploaded.json()["id"] == attachment_id
+    assert uploads[0][0] == "/hub/api/projects/demo/attachments"
+    assert uploads[0][1] == "Bearer human.jwt"
+    assert uploads[0][2]["filename"] == "说明.md"
+    assert uploads[0][2]["content"] == "中文内容".encode()
+    assert downloaded.status_code == 200
+    assert downloaded.content == "中文内容".encode()
+    assert downloaded.headers["content-disposition"].startswith("attachment;")
+    assert downloaded.headers["cache-control"] == "private, no-store"
+    assert downloaded.headers["x-content-type-options"] == "nosniff"
+
+
 def test_logout_suspends_worker_revokes_remote_capability_and_keeps_binding(
     monkeypatch,
 ):

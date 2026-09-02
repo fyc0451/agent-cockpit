@@ -229,6 +229,87 @@ def human_api(
     return data
 
 
+def human_attachment_upload(
+    path: str,
+    authorization: str,
+    *,
+    filename: str,
+    media_type: str,
+    content: bytes,
+) -> dict[str, Any]:
+    """Upload one Team attachment through the fixed authenticated Hub route."""
+    if re.fullmatch(r"/hub/api/projects/[A-Za-z0-9_-]+/attachments", path) is None:
+        raise ValueError("Hub Team 附件路径无效")
+    if (
+        not authorization.startswith("Bearer ")
+        or not authorization[7:].strip()
+        or len(authorization) > 8192
+    ):
+        raise ValueError("需要有效的 Hub Human JWT")
+    try:
+        with httpx.Client(timeout=60) as client:
+            response = client.post(
+                f"{_team_hub_url()}{path}",
+                headers={"Authorization": authorization, "Accept": "application/json"},
+                files={"file": (filename, content, media_type)},
+            )
+    except httpx.HTTPError as exc:
+        raise HumanAPIError(502, f"Hub 附件上传失败: {exc}") from exc
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if response.is_error:
+        detail = data.get("detail") if isinstance(data, dict) else None
+        raise HumanAPIError(
+            response.status_code,
+            str(detail or f"Hub 返回 HTTP {response.status_code}"),
+        )
+    if not isinstance(data, dict):
+        raise HumanAPIError(502, "Hub 返回了无效的附件响应")
+    return data
+
+
+def human_attachment_download(
+    path: str,
+    authorization: str,
+) -> tuple[bytes, str, str]:
+    """Download one Team attachment; returns bytes, type, disposition."""
+    if re.fullmatch(
+        r"/hub/api/projects/[A-Za-z0-9_-]+/attachments/[0-9a-f]{32}", path,
+    ) is None:
+        raise ValueError("Hub Team 附件路径无效")
+    if (
+        not authorization.startswith("Bearer ")
+        or not authorization[7:].strip()
+        or len(authorization) > 8192
+    ):
+        raise ValueError("需要有效的 Hub Human JWT")
+    try:
+        with httpx.Client(timeout=60) as client:
+            response = client.get(
+                f"{_team_hub_url()}{path}",
+                headers={"Authorization": authorization},
+            )
+    except httpx.HTTPError as exc:
+        raise HumanAPIError(502, f"Hub 附件下载失败: {exc}") from exc
+    if response.is_error:
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        detail = data.get("detail") if isinstance(data, dict) else None
+        raise HumanAPIError(
+            response.status_code,
+            str(detail or f"Hub 返回 HTTP {response.status_code}"),
+        )
+    return (
+        response.content,
+        response.headers.get("content-type", "application/octet-stream"),
+        response.headers.get("content-disposition", "attachment"),
+    )
+
+
 def _session_lead_capability_post(
     project_slug: str,
     path: str,

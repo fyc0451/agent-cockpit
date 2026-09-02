@@ -8,14 +8,34 @@ import {
   listTeamReplyRequests,
   rejectTeamReplyRequest,
 } from '../../api/teamAuth'
-import { listTeamMessages, sendTeamMessage } from '../../api/teamLedger'
-import type { TeamMessage } from '../../api/teamLedger'
+import {
+  deleteTeamAttachment,
+  handoffTeamMessageToLocal,
+  listTeamMessages,
+  sendTeamMessage,
+  teamAttachmentDownloadUrl,
+  uploadTeamAttachment,
+} from '../../api/teamLedger'
+import type { TeamAttachment, TeamMessage } from '../../api/teamLedger'
 import { mentionQueryAt } from '../group-chat/model'
-import type { TeamBinding, TeamMember, TeamTopic } from './model'
+import type { TeamBinding, TeamConsultCandidate, TeamMember, TeamTopic } from './model'
 import { TeamReplyPanel } from './TeamReplyPanel'
 
 const REPLY_SUBJECT_PREFIX = 'Re: '
 const QUESTION_PREVIEW_LENGTH = 20
+const MAX_TEAM_ATTACHMENTS = 4
+
+function handoffRequestId(): string {
+  const bytes = new Uint8Array(8)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')
+}
+
+function attachmentSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+}
 
 function isNearBottom(element: HTMLElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight < 80
@@ -100,14 +120,18 @@ export function TeamTimeline({
   binding,
   membership,
   members = [],
+  consultTargets = [],
   mentionRequest,
+  onOpenLocalSession,
 }: {
   topic: string
   topicName: string
   binding?: TeamBinding | null
   membership?: TeamTopic['membership']
   members?: TeamMember[]
+  consultTargets?: TeamConsultCandidate[]
   mentionRequest?: { topic: string; handle: string; nonce: number } | null
+  onOpenLocalSession?: (session: string) => void
 }) {
   const queryClient = useQueryClient()
   const messagesQ = useQuery({
@@ -149,6 +173,24 @@ export function TeamTimeline({
   const [activeMentionIndex, setActiveMentionIndex] = useState(0)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  const [attachments, setAttachments] = useState<TeamAttachment[]>([])
+  const [uploading, setUploading] = useState(false)
+  const uploadRef = useRef<HTMLInputElement>(null)
+  const [handoff, setHandoff] = useState<{
+    messageId: number
+    requestId: string
+    targetSession: string
+    scope: string
+    acceptance: string
+  } | null>(null)
+  const [handoffBusy, setHandoffBusy] = useState(false)
+  const [handoffError, setHandoffError] = useState<string | null>(null)
+  const [handoffDone, setHandoffDone] = useState<{
+    messageId: number
+    targetSession: string
+    lead: string
+    notified: boolean
+  } | null>(null)
   const [olderRows, setOlderRows] = useState<TeamMessage[]>([])
   const [olderCursor, setOlderCursor] = useState<number | null>(null)
   const [olderHasMore, setOlderHasMore] = useState<boolean | null>(null)
@@ -196,6 +238,10 @@ export function TeamTimeline({
     setOlderCursor(null)
     setOlderHasMore(null)
     setOlderError(null)
+    setAttachments([])
+    setHandoff(null)
+    setHandoffError(null)
+    setHandoffDone(null)
   }, [topic])
 
   useEffect(() => {
@@ -256,17 +302,101 @@ export function TeamTimeline({
     setMention(null)
   }
 
+  const uploadFiles = async (files: File[]) => {
+    const slots = Math.max(0, MAX_TEAM_ATTACHMENTS - attachments.length)
+    if (slots === 0 || uploading) return
+    setUploading(true)
+    setSendError(null)
+    const uploaded: TeamAttachment[] = []
+    try {
+      for (const file of files.slice(0, slots)) {
+        uploaded.push(await uploadTeamAttachment(topic, file))
+      }
+      setAttachments((current) => [...current, ...uploaded])
+      if (files.length > slots) {
+        setSendError(`每条消息最多 ${MAX_TEAM_ATTACHMENTS} 个附件`)
+      }
+    } catch (err) {
+      setAttachments((current) => [...current, ...uploaded])
+      setSendError(err instanceof ApiError ? err.message : String(err))
+    } finally {
+      setUploading(false)
+      if (uploadRef.current) uploadRef.current.value = ''
+    }
+  }
+
+  const removeAttachment = async (attachment: TeamAttachment) => {
+    setSendError(null)
+    try {
+      await deleteTeamAttachment(topic, attachment.id)
+      setAttachments((current) => current.filter((item) => item.id !== attachment.id))
+    } catch (err) {
+      setSendError(err instanceof ApiError ? err.message : String(err))
+    }
+  }
+
+  const openHandoff = (row: TeamMessage) => {
+    const preferred = binding?.consultTarget?.ready
+      ? binding.consultTarget.session
+      : consultTargets[0]?.session ?? ''
+    setHandoff({
+      messageId: row.id,
+      requestId: handoffRequestId(),
+      targetSession: preferred,
+      scope: '',
+      acceptance: '先复现问题，完成针对性修复与测试，并返回可核对的结果。',
+    })
+    setHandoffError(null)
+    setHandoffDone(null)
+  }
+
+  const submitHandoff = async () => {
+    if (!handoff || !handoff.targetSession || !handoff.scope.trim() || handoffBusy) return
+    setHandoffBusy(true)
+    setHandoffError(null)
+    try {
+      const result = await handoffTeamMessageToLocal(topic, {
+        requestId: handoff.requestId,
+        messageId: handoff.messageId,
+        targetSession: handoff.targetSession,
+        scope: handoff.scope.trim(),
+        acceptance: handoff.acceptance.trim(),
+      })
+      setHandoffDone({
+        messageId: handoff.messageId,
+        targetSession: result.targetSession,
+        lead: result.lead,
+        notified: result.notified,
+      })
+      setHandoff(null)
+    } catch (err) {
+      setHandoffError(err instanceof ApiError ? err.message : String(err))
+    } finally {
+      setHandoffBusy(false)
+    }
+  }
+
   const onSend = async () => {
-    const text = draft.trim()
-    if (!text || !hasRecipients || sending) return
+    const text = draft.trim() || (
+      attachments.length > 0
+        ? `附件：${attachments.map((item) => item.filename).join('、')}`
+        : ''
+    )
+    if (!text || !hasRecipients || sending || uploading) return
     setSending(true)
     setSendError(null)
     try {
-      await sendTeamMessage(topic, text, broadcast ? null : selectedHandles)
+      await sendTeamMessage(
+        topic,
+        text,
+        broadcast ? null : selectedHandles,
+        attachments.map((item) => item.id),
+      )
       setDraft('')
       setSelectedHandles([])
       setBroadcast(false)
       setMention(null)
+      setAttachments([])
       await queryClient.invalidateQueries({ queryKey: ['team-chat', topic] })
     } catch (err) {
       setSendError(err instanceof ApiError ? err.message : String(err))
@@ -450,6 +580,20 @@ export function TeamTimeline({
             ) : (
               <div className="gc-team-msg-body">{row.body_md}</div>
             )}
+            {row.attachments.length > 0 && (
+              <div className="gc-team-message-attachments" aria-label="消息附件">
+                {row.attachments.map((attachment) => (
+                  <a
+                    key={attachment.id}
+                    href={teamAttachmentDownloadUrl(topic, attachment.id)}
+                    download={attachment.filename}
+                    title={`${attachment.filename} · ${attachment.sha256}`}
+                  >
+                    📎 {attachment.filename} · {attachmentSize(attachment.size)}
+                  </a>
+                ))}
+              </div>
+            )}
             {row.replyEvidence && (
               <div className="gc-team-reply-evidence" aria-label="回复证据">
                 <span title={[
@@ -500,6 +644,105 @@ export function TeamTimeline({
                 )}
               </div>
             )}
+            {binding?.managedRuntime
+              && currentHandle
+              && row.mention_handles.some(
+                (handle) => handle.toLowerCase() === currentHandle,
+              ) && (
+              <div className="gc-team-local-handoff">
+                {handoff?.messageId === row.id ? (
+                  <div className="gc-team-local-handoff-form">
+                    <strong>交给本地开发会话</strong>
+                    <span>
+                      请把要做的事情写成明确范围。只有你在这里填写的内容会被投递；
+                      Team 原文不会直接进入本地会话。
+                    </span>
+                    <label>
+                      目标会话
+                      <select
+                        aria-label="本地处理会话"
+                        value={handoff.targetSession}
+                        disabled={handoffBusy}
+                        onChange={(event) => setHandoff({
+                          ...handoff,
+                          targetSession: event.target.value,
+                        })}
+                      >
+                        <option value="">请选择同项目普通会话</option>
+                        {consultTargets.map((target) => (
+                          <option key={target.session} value={target.session}>{target.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      授权范围
+                      <textarea
+                        aria-label="本地处理授权范围"
+                        value={handoff.scope}
+                        disabled={handoffBusy}
+                        onChange={(event) => setHandoff({ ...handoff, scope: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      验收标准
+                      <textarea
+                        aria-label="本地处理验收标准"
+                        value={handoff.acceptance}
+                        disabled={handoffBusy}
+                        onChange={(event) => setHandoff({
+                          ...handoff,
+                          acceptance: event.target.value,
+                        })}
+                      />
+                    </label>
+                    {consultTargets.length === 0 && (
+                      <span className="gc-team-error">当前没有同项目、正在运行的普通开发 Lead。</span>
+                    )}
+                    {handoffError && <span className="gc-team-error">{handoffError}</span>}
+                    <div className="gc-team-reply-actions">
+                      <button
+                        type="button"
+                        disabled={handoffBusy}
+                        onClick={() => setHandoff(null)}
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        className="is-primary"
+                        disabled={
+                          handoffBusy
+                          || !handoff.targetSession
+                          || !handoff.scope.trim()
+                        }
+                        onClick={() => void submitHandoff()}
+                      >
+                        {handoffBusy ? '投递中…' : '确认授权并投递'}
+                      </button>
+                    </div>
+                  </div>
+                ) : handoffDone?.messageId === row.id ? (
+                  <div className="gc-team-local-handoff-done">
+                    <span>
+                      已交给 {handoffDone.targetSession} · Lead {handoffDone.lead}
+                      {handoffDone.notified ? '，已通知处理' : '，请打开会话继续'}
+                    </span>
+                    {onOpenLocalSession && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenLocalSession(handoffDone.targetSession)}
+                      >
+                        打开本地会话
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <button type="button" onClick={() => openHandoff(row)}>
+                    交给本地会话处理
+                  </button>
+                )}
+              </div>
+            )}
             </div>
             )
           })}
@@ -540,6 +783,21 @@ export function TeamTimeline({
           <span className="gc-team-recipients-empty">输入 @ 搜索，或从右侧成员列表选择</span>
         )}
       </div>
+      {attachments.length > 0 && (
+        <div className="gc-team-pending-attachments" aria-label="待发送附件">
+          {attachments.map((attachment) => (
+            <button
+              key={attachment.id}
+              type="button"
+              disabled={sending || uploading}
+              aria-label={`移除附件 ${attachment.filename}`}
+              onClick={() => void removeAttachment(attachment)}
+            >
+              📎 {attachment.filename} · {attachmentSize(attachment.size)} ×
+            </button>
+          ))}
+        </div>
+      )}
       <form
         className="gc-team-composer"
         onSubmit={(event) => {
@@ -583,6 +841,23 @@ export function TeamTimeline({
             })}
           </div>
         )}
+        <button
+          type="button"
+          className="gc-team-attach-button"
+          disabled={sending || uploading || attachments.length >= MAX_TEAM_ATTACHMENTS}
+          onClick={() => uploadRef.current?.click()}
+        >
+          {uploading ? '上传中…' : '附件'}
+        </button>
+        <input
+          ref={uploadRef}
+          type="file"
+          multiple
+          hidden
+          aria-label="选择团队附件"
+          accept=".txt,.md,.log,.csv,.json,.pdf,.png,.jpg,.jpeg,.gif,.webp,.zip,.docx,.xlsx,.pptx"
+          onChange={(event) => void uploadFiles(Array.from(event.target.files ?? []))}
+        />
         <input
           ref={inputRef}
           aria-label="团队消息"
@@ -618,10 +893,18 @@ export function TeamTimeline({
               setMention(null)
             }
           }}
-          disabled={sending}
+          disabled={sending || uploading}
           placeholder="输入消息，键入 @ 选择收件人…"
         />
-        <button type="submit" disabled={sending || !draft.trim() || !hasRecipients}>
+        <button
+          type="submit"
+          disabled={
+            sending
+            || uploading
+            || (!draft.trim() && attachments.length === 0)
+            || !hasRecipients
+          }
+        >
           {sending ? '发送中…' : '发送'}
         </button>
       </form>

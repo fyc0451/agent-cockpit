@@ -17,6 +17,7 @@ export interface TeamMessage {
   sender_human_id: number | null
   sender_kind: string
   sender_agent: string | null
+  attachments: TeamAttachment[]
   replyEvidence: {
     contextAvailable: boolean
     contextFingerprint: string | null
@@ -26,6 +27,14 @@ export interface TeamMessage {
     consulted: boolean
     createdTs: number
   } | null
+}
+
+export interface TeamAttachment {
+  id: string
+  filename: string
+  media_type: string
+  size: number
+  sha256: string
 }
 
 export interface TeamMessagePage {
@@ -83,7 +92,35 @@ function parseMessage(raw: unknown): TeamMessage | null {
     sender_human_id: typeof raw.sender_human_id === 'number' ? raw.sender_human_id : null,
     sender_kind: typeof raw.sender_kind === 'string' ? raw.sender_kind : 'agent',
     sender_agent: typeof raw.sender_agent === 'string' ? raw.sender_agent : null,
+    attachments: Array.isArray(raw.attachments)
+      ? raw.attachments.map(parseAttachment).filter(
+        (item): item is TeamAttachment => item !== null,
+      )
+      : [],
     replyEvidence: parseReplyEvidence(raw.reply_evidence),
+  }
+}
+
+function parseAttachment(raw: unknown): TeamAttachment | null {
+  if (!isObj(raw)) return null
+  if (
+    typeof raw.id !== 'string'
+    || !/^[0-9a-f]{32}$/.test(raw.id)
+    || typeof raw.filename !== 'string'
+    || !raw.filename
+    || typeof raw.media_type !== 'string'
+    || typeof raw.size !== 'number'
+    || !Number.isFinite(raw.size)
+    || raw.size < 1
+    || typeof raw.sha256 !== 'string'
+    || !/^[0-9a-f]{64}$/.test(raw.sha256)
+  ) return null
+  return {
+    id: raw.id,
+    filename: raw.filename,
+    media_type: raw.media_type,
+    size: raw.size,
+    sha256: raw.sha256,
   }
 }
 
@@ -136,6 +173,7 @@ export async function sendTeamMessage(
   topic: string,
   text: string,
   mentionHandles: string[] | null,
+  attachmentIds: string[] = [],
 ): Promise<void> {
   const payload: Record<string, unknown> = {
     subject: '群聊消息',
@@ -143,6 +181,7 @@ export async function sendTeamMessage(
     importance: 'normal',
   }
   if (mentionHandles !== null) payload.mention_handles = mentionHandles
+  if (attachmentIds.length > 0) payload.attachment_ids = attachmentIds
   const response = await fetch(
     `/api/team/projects/${encodeURIComponent(topic)}/support-requests`,
     {
@@ -159,5 +198,102 @@ export async function sendTeamMessage(
       retryable: response.status >= 500,
       status: response.status,
     })
+  }
+}
+
+export async function uploadTeamAttachment(
+  topic: string,
+  file: File,
+): Promise<TeamAttachment> {
+  const form = new FormData()
+  form.append('file', file)
+  const response = await fetch(
+    `/api/team-auth/projects/${encodeURIComponent(topic)}/attachments`,
+    { method: 'POST', credentials: 'include', body: form },
+  )
+  if (!response.ok) {
+    throw new ApiError({
+      code: 'team_attachment_upload_failed',
+      message: await readError(response, '上传团队附件失败'),
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+  const attachment = parseAttachment(await response.json())
+  if (!attachment) {
+    throw new ApiError({
+      code: 'team_attachment_protocol_error',
+      message: '团队附件响应格式错误',
+      retryable: false,
+    })
+  }
+  return attachment
+}
+
+export async function deleteTeamAttachment(topic: string, attachmentId: string): Promise<void> {
+  const response = await fetch(
+    `/api/team-auth/projects/${encodeURIComponent(topic)}/attachments/${encodeURIComponent(attachmentId)}`,
+    { method: 'DELETE', credentials: 'include' },
+  )
+  if (!response.ok) {
+    throw new ApiError({
+      code: 'team_attachment_delete_failed',
+      message: await readError(response, '删除团队附件失败'),
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+}
+
+export function teamAttachmentDownloadUrl(topic: string, attachmentId: string): string {
+  return `/api/team-auth/projects/${encodeURIComponent(topic)}/attachments/${encodeURIComponent(attachmentId)}`
+}
+
+export async function handoffTeamMessageToLocal(
+  topic: string,
+  payload: {
+    requestId: string
+    messageId: number
+    targetSession: string
+    scope: string
+    acceptance: string
+  },
+): Promise<{ targetSession: string; lead: string; idempotent: boolean; notified: boolean }> {
+  const response = await fetch(
+    `/api/team-auth/projects/${encodeURIComponent(topic)}/local-handoffs`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        request_id: payload.requestId,
+        message_id: payload.messageId,
+        target_session: payload.targetSession,
+        scope: payload.scope,
+        acceptance: payload.acceptance,
+      }),
+    },
+  )
+  if (!response.ok) {
+    throw new ApiError({
+      code: 'team_local_handoff_failed',
+      message: await readError(response, '交给本地会话失败'),
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+  const raw = await response.json()
+  if (!isObj(raw) || typeof raw.target_session !== 'string' || typeof raw.lead !== 'string') {
+    throw new ApiError({
+      code: 'team_local_handoff_protocol_error',
+      message: '本地会话接收响应格式错误',
+      retryable: false,
+    })
+  }
+  return {
+    targetSession: raw.target_session,
+    lead: raw.lead,
+    idempotent: raw.idempotent === true,
+    notified: raw.notified === true,
   }
 }

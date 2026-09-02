@@ -377,6 +377,92 @@ def test_human_api_allows_plain_http_private_team_hub(monkeypatch):
     )
 
 
+def test_team_attachment_helpers_use_only_fixed_authenticated_routes(monkeypatch):
+    calls = []
+
+    class Response:
+        is_error = False
+        status_code = 201
+        content = b"downloaded"
+        headers = {
+            "content-type": "text/plain",
+            "content-disposition": 'attachment; filename="note.txt"',
+        }
+
+        @staticmethod
+        def json():
+            return {
+                "id": "a" * 32,
+                "filename": "note.txt",
+                "media_type": "text/plain",
+                "size": 4,
+                "sha256": "b" * 64,
+            }
+
+    class Client:
+        def __init__(self, **kwargs):
+            calls.append(("timeout", kwargs["timeout"]))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, url, headers, files):
+            calls.append(("POST", url, headers, files))
+            return Response()
+
+        def get(self, url, headers):
+            calls.append(("GET", url, headers))
+            return Response()
+
+    monkeypatch.setattr(hub_client, "TEAM_HUB_URL", "https://team.example")
+    monkeypatch.setattr(hub_client.httpx, "Client", Client)
+    attachment = hub_client.human_attachment_upload(
+        "/hub/api/projects/core/attachments",
+        "Bearer human.jwt",
+        filename="note.txt",
+        media_type="text/plain",
+        content=b"note",
+    )
+    downloaded = hub_client.human_attachment_download(
+        f"/hub/api/projects/core/attachments/{'a' * 32}",
+        "Bearer human.jwt",
+    )
+
+    assert attachment["id"] == "a" * 32
+    assert downloaded == (
+        b"downloaded", "text/plain", 'attachment; filename="note.txt"',
+    )
+    assert calls[1][1] == "https://team.example/hub/api/projects/core/attachments"
+    assert calls[1][2]["Authorization"] == "Bearer human.jwt"
+    assert calls[3][1].endswith(f"/attachments/{'a' * 32}")
+    assert calls[3][2]["Authorization"] == "Bearer human.jwt"
+
+
+def test_team_attachment_helpers_reject_arbitrary_paths_without_connecting(monkeypatch):
+    monkeypatch.setattr(
+        hub_client.httpx,
+        "Client",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    with pytest.raises(ValueError, match="附件路径无效"):
+        hub_client.human_attachment_upload(
+            "/hub/api/projects/core/attachments/../../admin",
+            "Bearer human.jwt",
+            filename="note.txt",
+            media_type="text/plain",
+            content=b"note",
+        )
+    with pytest.raises(ValueError, match="附件路径无效"):
+        hub_client.human_attachment_download(
+            "/hub/api/projects/core/attachments/not-a-token",
+            "Bearer human.jwt",
+        )
+
+
 def test_session_lead_reply_uses_capability_without_authorization(monkeypatch):
     calls = []
 

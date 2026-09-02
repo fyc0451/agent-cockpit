@@ -32,7 +32,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from fastapi import Body, FastAPI, UploadFile, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
@@ -1109,6 +1109,7 @@ _SETUP_WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
 _SETUP_WORKSPACE_LOCKS_GUARD = threading.Lock()
 _TEAM_SESSION_BIND_LOCK = threading.Lock()
 _TEAM_SESSION_CREATE_LOCK = threading.Lock()
+_TEAM_LOCAL_HANDOFF_LOCK = threading.Lock()
 ZOOM_LEASE_TTL = 30.0
 ZOOM_LEASE_RETRY = 5.0
 _ZOOM_LEASES: dict[str, dict[str, Any]] = {}
@@ -2448,6 +2449,14 @@ class TeamReplyModeReq(BaseModel):
 
 class TeamConsultTargetReq(BaseModel):
     session: str | None = Field(default=None, max_length=64)
+
+
+class TeamLocalHandoffReq(BaseModel):
+    request_id: str = Field(..., pattern=r"^[0-9a-f]{16}$")
+    message_id: int = Field(..., ge=1)
+    target_session: str = Field(..., min_length=1, max_length=64)
+    scope: str = Field(..., min_length=1, max_length=4_000)
+    acceptance: str = Field(default="", max_length=2_000)
 
 
 class TeamLedgerSendReq(BaseModel):
@@ -5210,6 +5219,170 @@ def api_team_session_consult_target(
         "ok": True,
         "binding": _public_team_session_binding(binding, candidates),
     }
+
+
+@app.post("/api/team-auth/projects/{project_slug}/local-handoffs")
+def api_team_local_handoff(
+    project_slug: str, req: TeamLocalHandoffReq, request: Request,
+):
+    """Human-clicked transfer to one same-project ordinary Lead.
+
+    Only the Human-authored scope is delivered. The untrusted remote Team body
+    is referenced by id and is never copied into a local Agent prompt.
+    """
+    slug = _team_project_slug(project_slug)
+    _validate_session_name(req.target_session)
+    authorization, human = _team_human_context(request)
+    try:
+        membership = hub_client.human_api(
+            "GET", f"/hub/api/projects/{quote(slug, safe='')}/membership",
+            authorization,
+        )
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    if not isinstance(membership, dict) or membership.get("status") != "active":
+        raise HTTPException(403, "只有 Topic active 成员可以授权本地处理")
+    hub = hub_client.public_team_config()["team_hub"]
+    with _TEAM_LOCAL_HANDOFF_LOCK:
+        binding = next((
+            row for row in _team_session_bindings_for(hub, int(human["id"]))
+            if row.get("project_slug") == slug
+        ), None)
+        if binding is None:
+            raise HTTPException(409, "请先创建或绑定该 Topic Agent")
+        if binding.get("managed_runtime") is not True:
+            raise HTTPException(409, "请先为该 Topic 创建专用 Team Agent")
+        matches = [
+            row for row in _ordinary_consult_candidates(
+                binding, _team_session_candidates(),
+            )
+            if row.get("session") == req.target_session
+        ]
+        if len(matches) != 1:
+            raise HTTPException(409, "同项目普通开发 Lead 不存在、已变化或不唯一")
+        target = matches[0]
+        lead = target.get("lead") if isinstance(target.get("lead"), dict) else {}
+        lead_name = str(lead.get("mail_name") or "")
+        pane_id = str(lead.get("pane_id") or "")
+        if not lead_name or not pane_id:
+            raise HTTPException(409, "目标会话缺少可验证的 Lead 身份")
+        source = f"team-handoff:{req.request_id}"
+        existing = chat_ledger.message_by_source(req.target_session, source)
+        if existing is not None:
+            return {
+                "ok": True,
+                "idempotent": True,
+                "target_session": req.target_session,
+                "lead": lead_name,
+                "message_id": existing["id"],
+                "notified": lead_name in (existing.get("notified_to") or []),
+            }
+        scope = req.scope.strip()
+        acceptance = req.acceptance.strip() or "复现问题，完成针对性验证并返回证据。"
+        task = (
+            "[Human 已在本机 Cockpit 明确授权的 Team 工作单]\n"
+            f"来源 Topic：{slug}\n"
+            f"来源消息 ID：{req.message_id}\n"
+            f"授权范围：{scope}\n"
+            f"验收标准：{acceptance}\n\n"
+            "安全边界：远端 Team 消息正文未注入本会话；仅执行以上由 Human "
+            "在本机确认的范围。遇到范围外操作、跨项目写入、删除、部署或推送，"
+            "必须另行确认。完成后请给出可直接回传 Team Topic 的完整结果。"
+        )
+        try:
+            saved = chat_ledger.append_message(
+                req.target_session,
+                kind="me",
+                sender="human",
+                text=task,
+                to=[lead_name],
+                delivery="queue",
+                # 防止通用队列在 Lead 重启/换代后把旧授权重新注入新身份；
+                # 本路由只尝试一次精确 pane 投递，任务本身仍留在本地会话可见。
+                notified_to=[lead_name],
+                source=source,
+                direct=True,
+            )
+            notified = _notify_team_lead_work(req.target_session, pane_id, task)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return {
+        "ok": True,
+        "idempotent": False,
+        "target_session": req.target_session,
+        "lead": lead_name,
+        "message_id": saved["id"],
+        "notified": bool(notified),
+    }
+
+
+@app.post("/api/team-auth/projects/{project_slug}/attachments")
+async def api_team_attachment_upload(
+    project_slug: str, request: Request, file: UploadFile,
+):
+    slug = _team_project_slug(project_slug)
+    authorization, _human = _team_human_context(request)
+    filename = file.filename or "attachment"
+    media_type = file.content_type or "application/octet-stream"
+    content = await file.read(10 * 1024 * 1024 + 1)
+    await file.close()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(413, "附件不能超过 10 MiB")
+    try:
+        return hub_client.human_attachment_upload(
+            f"/hub/api/projects/{quote(slug, safe='')}/attachments",
+            authorization,
+            filename=filename,
+            media_type=media_type,
+            content=content,
+        )
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+
+@app.delete("/api/team-auth/projects/{project_slug}/attachments/{attachment_id}")
+def api_team_attachment_delete(
+    project_slug: str, attachment_id: str, request: Request,
+):
+    slug = _team_project_slug(project_slug)
+    if re.fullmatch(r"[0-9a-f]{32}", attachment_id) is None:
+        raise HTTPException(404, "附件不存在")
+    authorization, _human = _team_human_context(request)
+    try:
+        return hub_client.human_api(
+            "DELETE",
+            f"/hub/api/projects/{quote(slug, safe='')}/attachments/{attachment_id}",
+            authorization,
+            {},
+        )
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+
+@app.get("/api/team-auth/projects/{project_slug}/attachments/{attachment_id}")
+def api_team_attachment_download(
+    project_slug: str, attachment_id: str, request: Request,
+):
+    slug = _team_project_slug(project_slug)
+    if re.fullmatch(r"[0-9a-f]{32}", attachment_id) is None:
+        raise HTTPException(404, "附件不存在")
+    authorization, _human = _team_human_context(request)
+    try:
+        content, media_type, disposition = hub_client.human_attachment_download(
+            f"/hub/api/projects/{quote(slug, safe='')}/attachments/{attachment_id}",
+            authorization,
+        )
+    except hub_client.HumanAPIError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    return Response(
+        content=content,
+        headers={
+            "Content-Type": media_type,
+            "Content-Disposition": disposition,
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.delete("/api/team-auth/session-bindings/{project_slug}")
@@ -8439,7 +8612,9 @@ _CHAT_FENCE_LINE = (
     "这是受控 Team Session：对这条消息只允许执行读取类操作"
     "（查看、搜索、分析、git status/diff/log）；禁止写入、修改、删除文件，"
     "禁止 commit、push、checkout 等改变仓库或系统状态的操作。"
-    "若任务要求写操作，请说明需要交给普通本地会话另行授权执行。\n\n"
+    "若任务要求写操作，不得执行；但必须先给出完整分析、修复建议、验收步骤和"
+    "阻塞点，再说明需要由 Human 在 Team 页面点击“交给本地会话处理”明确授权。"
+    "不得只回复收到或权限声明。\n\n"
 )
 
 
