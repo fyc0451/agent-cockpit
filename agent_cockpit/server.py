@@ -7180,13 +7180,37 @@ def _harvest_skip_line(stripped: str) -> bool:
     return False
 
 
+def _balanced_markdown_fence_lines(lines: list[str]) -> set[int]:
+    """只保护成对围栏；孤立围栏不能绕过终端噪声过滤。"""
+    protected: set[int] = set()
+    opened: int | None = None
+    for index, line in enumerate(lines):
+        if not line.strip().startswith("```"):
+            continue
+        if opened is None:
+            opened = index
+            continue
+        protected.update(range(opened, index + 1))
+        opened = None
+    return protected
+
+
 def _strip_harvest_tui_chrome(summary: str) -> str:
     """无损剥离旧 harvest 气泡里的 TUI 壳，保留真实回复的全部段落和缩进。"""
     kept: list[str] = []
     skipping_recap = False
     skipping_dump = False
-    for line in _restore_box_tables(_clean_chat_body(summary)).splitlines():
+    lines = _restore_box_tables(_clean_chat_body(summary)).splitlines()
+    fenced = _balanced_markdown_fence_lines(lines)
+    for index, line in enumerate(lines):
         stripped = line.strip()
+        # Markdown 围栏里的内容是回复正文，不是 TUI 命令回显。先于 shell/tool
+        # 过滤处理，否则 `sudo ...`、`$ ...` 等合法操作步骤会被删成空代码块。
+        if index in fenced:
+            kept.append(line.rstrip())
+            skipping_recap = False
+            skipping_dump = False
+            continue
         if not stripped:
             skipping_recap = False
             if kept and kept[-1] != "":
@@ -7236,15 +7260,45 @@ def _strip_harvest_tui_chrome(summary: str) -> str:
 
 def _unwrap_harvest_wrap(text: str) -> str:
     """把窄屏 TUI 折成的碎行拼回句子，不碰列表和标题。"""
-    return pane_live.unwrap_terminal_wrap(text)
+    lines = text.splitlines()
+    fenced = _balanced_markdown_fence_lines(lines)
+    if not fenced:
+        return pane_live.unwrap_terminal_wrap(text)
+    parts: list[str] = []
+    start = 0
+    while start < len(lines):
+        protected = start in fenced
+        end = start + 1
+        while end < len(lines) and (end in fenced) == protected:
+            end += 1
+        chunk_lines = lines[start:end]
+        if protected:
+            parts.append("\n".join(chunk_lines))
+        else:
+            # unwrap_terminal_wrap 会 strip 首尾空白；代码围栏边界的空行属于
+            # Markdown 结构，需在处理普通正文后原样补回。
+            first = next((i for i, line in enumerate(chunk_lines) if line), len(chunk_lines))
+            last = next(
+                (i for i in range(len(chunk_lines) - 1, -1, -1) if chunk_lines[i]),
+                -1,
+            )
+            if last < first:
+                parts.append("\n" * max(0, len(chunk_lines) - 1))
+            else:
+                core = pane_live.unwrap_terminal_wrap("\n".join(chunk_lines[first:last + 1]))
+                parts.append("\n" * first + core + "\n" * (len(chunk_lines) - last - 1))
+        start = end
+    return "\n".join(parts)
 
 
 def _drop_harvest_prompt_echo(text: str) -> str:
     """TUI 里回放的 @花名 提示不是结论，只在抽取时丢掉。"""
+    lines = text.splitlines()
+    fenced = _balanced_markdown_fence_lines(lines)
     kept = [
         line
-        for line in text.splitlines()
-        if not re.match(r"^@[A-Za-z][\w-]*\b", line.strip())
+        for index, line in enumerate(lines)
+        if index in fenced or not re.match(r"^@[A-Za-z][\w-]*\b", line.strip())
     ]
     return "\n".join(kept).strip()
 

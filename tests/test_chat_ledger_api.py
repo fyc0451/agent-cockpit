@@ -3288,6 +3288,32 @@ def test_strip_harvest_tui_chrome_preserves_real_reply_verbatim():
     )
 
 
+def test_ledger_mail_preserves_fenced_shell_command_verbatim():
+    text = (
+        "A002 需要交互输入 `sudo` 密码。请执行：\n\n"
+        "```bash\n"
+        "ssh -t team_hub 'sudo /opt/mcp-agent-mail/.venv/bin/python "
+        "/home/fyc/team-hub-maintenance/reset-human.py --apply'\n"
+        "@decorator\n"
+        "```\n\n"
+        "执行后核验服务。"
+    )
+    served = server._ledger_chat_mail({
+        "id": "msg_fenced", "session": "cockpit", "kind": "agent",
+        "sender": "TopazOwl", "text": text, "to": ["human"], "ts": 1,
+    })
+    assert served is not None
+    assert served["text"] == text
+
+
+def test_unclosed_fence_does_not_bypass_harvest_noise_filter():
+    text = server._strip_harvest_tui_chrome(
+        "真实结论仍在。\n```bash\n$ private-tool-command --token redacted\n"
+    )
+    assert "真实结论仍在" in text
+    assert "private-tool-command" not in text
+
+
 def test_strip_harvest_tui_chrome_removes_pure_shell_and_inline_clock():
     text = server._strip_harvest_tui_chrome(
         "┃  ◆ Run Validate records  [hooks: 2]\n"

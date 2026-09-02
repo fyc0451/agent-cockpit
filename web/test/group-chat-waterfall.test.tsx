@@ -232,6 +232,30 @@ describe('Waterfall 长文本', () => {
     expect(document.querySelector('.gc-msg-code')).not.toBeNull()
   })
 
+  it('围栏 bash 命令显示完整正文而不是只剩语言标签', () => {
+    render(
+      <Waterfall
+        entries={[{
+          ...entry,
+          id: 'msg_fenced_command',
+          text: (
+            'A002 需要交互输入 `sudo` 密码。请执行：\n\n'
+            + '```bash\n'
+            + "ssh -t team_hub 'sudo /opt/mcp-agent-mail/.venv/bin/python "
+            + "/home/fyc/team-hub-maintenance/reset-human.py --apply'\n"
+            + '```\n\n执行后核验服务。'
+          ),
+        }]}
+        hasSession
+      />,
+    )
+    const block = document.querySelector('pre.gc-msg-code')
+    expect(block).not.toBeNull()
+    expect(block).toHaveAttribute('data-lang', 'bash')
+    expect(block).toHaveTextContent('ssh -t team_hub')
+    expect(block).toHaveTextContent('reset-human.py --apply')
+  })
+
   it('表格包在可横滑容器里', () => {
     render(
       <Waterfall
