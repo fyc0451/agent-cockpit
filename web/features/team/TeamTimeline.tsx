@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '../../api/client'
 import {
   approveTeamReplyRequest,
+  listTeamProgress,
   listTeamReplyRequests,
   rejectTeamReplyRequest,
 } from '../../api/teamAuth'
@@ -18,7 +19,9 @@ import {
 } from '../../api/teamLedger'
 import type { TeamAttachment, TeamMessage } from '../../api/teamLedger'
 import { mentionQueryAt } from '../group-chat/model'
-import type { TeamBinding, TeamConsultCandidate, TeamMember, TeamTopic } from './model'
+import type {
+  TeamBinding, TeamConsultCandidate, TeamMember, TeamProgress, TeamTopic,
+} from './model'
 import { TeamReplyPanel } from './TeamReplyPanel'
 
 const REPLY_SUBJECT_PREFIX = 'Re: '
@@ -94,6 +97,65 @@ function fullTeamTimestamp(value: string): string {
   ].join(' ')
 }
 
+function progressPhaseText(phase: TeamProgress['phase']): string {
+  if (phase === 'blocked') return '处理受阻'
+  if (phase === 'waiting') return '等待 Agent 开始'
+  return '正在处理'
+}
+
+function progressElapsed(startedAt: string): string {
+  const started = parseTeamTimestamp(startedAt)
+  if (!started) return ''
+  const seconds = Math.max(0, Math.floor((Date.now() - started.getTime()) / 1000))
+  return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+}
+
+function TeamProgressCard({
+  progress,
+  history,
+  messageId,
+}: {
+  progress?: TeamProgress
+  history: TeamProgress[]
+  messageId: number
+}) {
+  const active = !!progress
+  const [open, setOpen] = useState(active)
+  const wasActive = useRef(active)
+  useEffect(() => {
+    if (active !== wasActive.current) {
+      setOpen(active)
+      wasActive.current = active
+    }
+  }, [active])
+  return (
+    <details
+      className="gc-team-progress"
+      data-testid={`team-progress-${messageId}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <span className={`gc-team-progress-dot is-${progress?.phase ?? 'done'}`} />
+        {progress
+          ? `${progress.agentName ?? 'Team Agent'} · ${progressPhaseText(progress.phase)}`
+          : '处理过程 · 已完成'}
+        {progress && <small>已用时 {progressElapsed(progress.startedAt)}</small>}
+      </summary>
+      <div className="gc-team-progress-history">
+        {history.map((item) => (
+          <div key={`${item.agentName ?? 'agent'}-${item.sequence}`}>
+            <time title={fullTeamTimestamp(item.updatedAt)}>
+              {formatTeamTimestamp(item.updatedAt)}
+            </time>
+            <span>{item.summary ?? progressPhaseText(item.phase)}</span>
+          </div>
+        ))}
+      </div>
+    </details>
+  )
+}
+
 function matchReplyQuestions(rows: TeamMessage[]): Map<number, TeamMessage> {
   const questionsBySubject = new Map<string, TeamMessage[]>()
   const matches = new Map<number, TeamMessage>()
@@ -150,6 +212,14 @@ export function TeamTimeline({
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
   })
+  const progressQ = useQuery({
+    queryKey: ['team-progress', topic],
+    queryFn: () => listTeamProgress(topic),
+    enabled: topic.length > 0,
+    refetchInterval: 2_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
+  })
   const decisionM = useMutation({
     mutationFn: ({ inboxItemId, decision }: {
       inboxItemId: number
@@ -192,6 +262,7 @@ export function TeamTimeline({
     notified: boolean
   } | null>(null)
   const [olderRows, setOlderRows] = useState<TeamMessage[]>([])
+  const [progressHistory, setProgressHistory] = useState<Record<number, TeamProgress[]>>({})
   const [olderCursor, setOlderCursor] = useState<number | null>(null)
   const [olderHasMore, setOlderHasMore] = useState<boolean | null>(null)
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -242,7 +313,27 @@ export function TeamTimeline({
     setHandoff(null)
     setHandoffError(null)
     setHandoffDone(null)
+    setProgressHistory({})
   }, [topic])
+
+  useEffect(() => {
+    if (!progressQ.data) return
+    setProgressHistory((current) => {
+      const next = { ...current }
+      for (const progress of progressQ.data) {
+        const history = next[progress.messageId] ?? []
+        const previous = history[history.length - 1]
+        if (
+          !previous
+          || previous.sequence !== progress.sequence
+          || previous.agentName !== progress.agentName
+        ) {
+          next[progress.messageId] = [...history, progress].slice(-10)
+        }
+      }
+      return next
+    })
+  }, [progressQ.data])
 
   useEffect(() => {
     const available = new Set(availableHandleKey.split('|').filter(Boolean))
@@ -417,8 +508,14 @@ export function TeamTimeline({
     : olderCursor
   const historyKey = rows.map((row) => row.id).join('|')
   const replyQuestions = matchReplyQuestions(rows)
+  const repliedQuestionIds = new Set(
+    [...replyQuestions.values()].map((question) => question.id),
+  )
   const replyRequests = new Map(
     (requestsQ.data ?? []).map((request) => [request.messageId, request]),
+  )
+  const activeProgress = new Map(
+    (progressQ.data ?? []).map((progress) => [progress.messageId, progress]),
   )
 
   const replyStatusText = (status: string) => {
@@ -545,6 +642,9 @@ export function TeamTimeline({
           {rows.map((row) => {
             const request = replyRequests.get(row.id)
             const question = replyQuestions.get(row.id)
+            const progress = activeProgress.get(row.id)
+            const progressRows = progressHistory[row.id] ?? []
+            const showCompletedProgress = repliedQuestionIds.has(row.id) && progressRows.length > 0
             return (
             <div key={row.id} className="gc-team-msg" data-testid={`team-msg-${row.id}`}>
             <div className="gc-team-msg-meta gc-team-msg-header">
@@ -643,6 +743,13 @@ export function TeamTimeline({
                   <span>{replyStatusText(request.status)}</span>
                 )}
               </div>
+            )}
+            {(progress || showCompletedProgress) && (
+              <TeamProgressCard
+                progress={progress}
+                history={progressRows}
+                messageId={row.id}
+              />
             )}
             {binding?.managedRuntime
               && currentHandle

@@ -630,6 +630,7 @@ def test_worker_tick_wakes_running_done_lead(monkeypatch, reply_mode):
         "client_session_id": "client-1",
         "reply_token": "reply-secret",
         "status": "idle",
+        "progress": None,
     })]
 
 

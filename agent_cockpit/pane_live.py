@@ -155,26 +155,55 @@ _CODEX_TOOL_PREFIXES = (
     "<thinking>",
 )
 
+_BULLET_PROGRESS_MARKERS = {
+    "codex": ("•",),
+    "claude": ("●",),
+    "kimi": ("●",),
+}
+_BULLET_TOOL_PREFIXES = (
+    "Used ", "Write(", "Read(", "Grep(", "Glob(", "Bash(", "Task(",
+    "Ran ", "Now I see", "Compacted", "background ", "recap:",
+)
+_UNSAFE_PROGRESS_RE = re.compile(
+    r"(?:https?://|`|```|(?:^|\s)(?:ssh|sudo|curl|wget|git|python\d*)\s|"
+    r"/(?:home|Users|root|etc|var|opt|mnt)/|(?:[A-Za-z]:\\)|"
+    r"\b(?:password|passwd|secret|token|api[_ -]?key|authorization|credential)\b|"
+    r"(?:密码|密钥|令牌|凭据)|\b[A-Za-z_][A-Za-z0-9_]{2,}=\S+|"
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b|[A-Fa-f0-9]{32,}|[A-Za-z0-9_-]{48,})",
+    re.IGNORECASE,
+)
+
+
+def sanitize_live_progress(value: str) -> str:
+    """Fail closed when a pane sentence resembles code, credentials or paths."""
+    summary = re.sub(r"\s+", " ", value).strip()
+    if (
+        len(summary) < 12
+        or _UNSAFE_PROGRESS_RE.search(summary)
+        or any(ord(char) < 32 for char in summary)
+    ):
+        return ""
+    return summary[:159] + "…" if len(summary) > 160 else summary
+
 
 def extract_live_progress(text: str, agent_kind: str = "") -> str:
-    """按 agent 抽一条给人看的进度。Codex 只留非工具 • 句，不进账本。"""
-    if (agent_kind or "").strip().lower() != "codex":
+    """按 Agent 适配器抽用户可见进度；未知界面安全降级为空。"""
+    kind = (agent_kind or "").strip().lower()
+    markers = _BULLET_PROGRESS_MARKERS.get(kind)
+    if markers is None:
         return ""
     last = ""
     for raw in unwrap_terminal_wrap(text).splitlines():
         stripped = raw.strip()
-        if not stripped.startswith("•"):
+        marker = next((item for item in markers if stripped.startswith(item)), None)
+        if marker is None:
             continue
-        body = stripped[1:].lstrip()
-        if not body or any(body.startswith(prefix) for prefix in _CODEX_TOOL_PREFIXES):
+        body = stripped[len(marker):].lstrip()
+        prefixes = _CODEX_TOOL_PREFIXES if kind == "codex" else _BULLET_TOOL_PREFIXES
+        if not body or any(body.startswith(prefix) for prefix in prefixes):
             continue
         last = body
-    last = re.sub(r"\s+", " ", last).strip()
-    if len(last) < 12:
-        return ""
-    if len(last) > 160:
-        return last[:159] + "…"
-    return last
+    return sanitize_live_progress(last)
 
 
 def extract_pane_text(raw: dict[str, Any] | None) -> str:

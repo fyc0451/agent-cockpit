@@ -6,6 +6,7 @@ import {
   createTeamInvitation,
   deleteTeamSession,
   listTeamMembers,
+  listTeamProgress,
   listTeamReplyRequests,
   listTeamProjects,
   rejectTeamReplyRequest,
@@ -402,5 +403,33 @@ describe('团队普通成员 API', () => {
     )
     expect(String(fetchMock.mock.calls[2][0])).toContain('/reply-requests/31/approve')
     expect(String(fetchMock.mock.calls[3][0])).toContain('/reply-requests/32/reject')
+  })
+
+  it('解析短时 Agent 进度且忽略无效行', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        progress: [{
+          message_id: 42,
+          agent_name: 'TopazOwl',
+          phase: 'working',
+          summary: '正在核对测试结果。',
+          sequence: 3,
+          started_at: '2026-09-03T06:00:00Z',
+          updated_at: '2026-09-03T06:00:04Z',
+        }, { message_id: 0, phase: 'working' }],
+      }),
+    } as Response))
+
+    await expect(listTeamProgress('ready')).resolves.toEqual([{
+      messageId: 42,
+      agentName: 'TopazOwl',
+      phase: 'working',
+      summary: '正在核对测试结果。',
+      sequence: 3,
+      startedAt: '2026-09-03T06:00:00Z',
+      updatedAt: '2026-09-03T06:00:04Z',
+    }])
   })
 })

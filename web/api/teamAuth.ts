@@ -9,6 +9,7 @@ import type {
   TeamUser,
   TeamMember,
   TeamReplyRequest,
+  TeamProgress,
 } from '../features/team/model'
 
 function isObj(v: unknown): v is Record<string, unknown> {
@@ -681,6 +682,46 @@ export async function listTeamReplyRequests(projectSlug: string): Promise<TeamRe
   const data = await response.json()
   const rows = isObj(data) && Array.isArray(data.requests) ? data.requests : []
   return rows.map(parseReplyRequest).filter((item): item is TeamReplyRequest => item !== null)
+}
+
+function parseTeamProgress(raw: unknown): TeamProgress | null {
+  if (
+    !isObj(raw)
+    || typeof raw.message_id !== 'number'
+    || raw.message_id <= 0
+    || typeof raw.sequence !== 'number'
+    || raw.sequence <= 0
+    || (raw.phase !== 'working' && raw.phase !== 'waiting' && raw.phase !== 'blocked')
+    || typeof raw.started_at !== 'string'
+    || typeof raw.updated_at !== 'string'
+  ) return null
+  return {
+    messageId: raw.message_id,
+    agentName: typeof raw.agent_name === 'string' ? raw.agent_name : null,
+    phase: raw.phase,
+    summary: typeof raw.summary === 'string' ? raw.summary : null,
+    sequence: raw.sequence,
+    startedAt: raw.started_at,
+    updatedAt: raw.updated_at,
+  }
+}
+
+export async function listTeamProgress(projectSlug: string): Promise<TeamProgress[]> {
+  const response = await fetch(
+    `/api/team/projects/${encodeURIComponent(projectSlug)}/progress`,
+    { credentials: 'include' },
+  )
+  if (!response.ok) {
+    throw new ApiError({
+      code: 'team_progress_failed',
+      message: '读取 Agent 处理进度失败',
+      retryable: response.status >= 500,
+      status: response.status,
+    })
+  }
+  const data = await response.json()
+  const rows = isObj(data) && Array.isArray(data.progress) ? data.progress : []
+  return rows.map(parseTeamProgress).filter((item): item is TeamProgress => item !== null)
 }
 
 async function decideTeamReplyRequest(

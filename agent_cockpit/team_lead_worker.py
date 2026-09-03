@@ -19,7 +19,7 @@ from typing import Any
 from . import runtime_paths
 
 STATE_PATH = runtime_paths.store("inbox_route")
-STATE_VERSION = 6
+STATE_VERSION = 7
 CONSULT_TTL_SECONDS = 10 * 60
 REPLY_EVIDENCE_LIMIT = 1_000
 _lock = threading.RLock()
@@ -53,16 +53,16 @@ def _load() -> dict[str, Any]:
         return _empty()
     if (
         isinstance(data, dict)
-        and data.get("version") in {4, 5}
+        and data.get("version") in {4, 5, 6}
         and isinstance(data.get("work_items"), list)
     ):
         return {
             "version": STATE_VERSION,
             "work_items": data["work_items"],
             "consult_requests": (
-                data.get("consult_requests", []) if data.get("version") == 5 else []
+                data.get("consult_requests", []) if data.get("version") in {5, 6} else []
             ),
-            "reply_evidence": [],
+            "reply_evidence": data.get("reply_evidence", []) if data.get("version") == 6 else [],
         }
     if (
         not isinstance(data, dict)
@@ -215,7 +215,7 @@ def reset_notifications() -> None:
             try:
                 legacy = json.loads(STATE_PATH.read_text(encoding="utf-8")).get(
                     "version"
-                ) in {2, 3, 4, 5}
+                ) in {2, 3, 4, 5, 6}
             except (OSError, UnicodeError, ValueError, AttributeError):
                 pass
         data = _load()
@@ -278,6 +278,7 @@ def poll_binding(
         claimed = _validated_claim(result, binding, candidate)
         if claimed is None:
             return {"status": "empty"}
+        claimed["created_ts"] = current_time
         with _lock:
             data = _load()
             current = next((
@@ -292,6 +293,12 @@ def poll_binding(
                 claimed["response"] = current.get("response")
                 if isinstance(current.get("context_pack"), dict):
                     claimed["context_pack"] = current["context_pack"]
+                for key in (
+                    "progress_phase", "progress_summary", "progress_sequence",
+                    "progress_baseline_summary",
+                ):
+                    if key in current:
+                        claimed[key] = current[key]
                 claimed["notified"] = current.get("notified", False)
                 current.clear()
                 current.update(claimed)
@@ -353,7 +360,55 @@ def next_for_binding(binding: dict[str, Any]) -> dict[str, Any] | None:
         "reply_mode": item.get("reply_mode"),
         "message": dict(item.get("message") or {}),
         "state": item.get("state"),
+        "inbox_item_id": item.get("inbox_item_id"),
+        "started_at": item.get("created_ts"),
     }
+
+
+def update_progress(
+    binding: dict[str, Any], *, phase: str, summary: str | None,
+) -> dict[str, Any] | None:
+    """Return a stable sequence for the current work; do not persist history."""
+    if phase not in {"working", "waiting", "blocked"}:
+        raise ValueError("Team Lead 进度阶段无效")
+    clean_summary = summary.strip() if isinstance(summary, str) else ""
+    with _lock:
+        data = _load()
+        rows = [
+            item for item in data["work_items"]
+            if _binding_matches(item, binding)
+            and item.get("state") in {"pending", "responding"}
+        ]
+        if not rows:
+            return None
+        item = min(rows, key=lambda row: float(row.get("created_ts") or 0))
+        if not item.get("progress_sequence"):
+            item["progress_baseline_summary"] = clean_summary
+            clean_summary = ""
+        elif (
+            clean_summary
+            and clean_summary == item.get("progress_baseline_summary")
+            and not item.get("progress_summary")
+        ):
+            clean_summary = ""
+        changed = (
+            item.get("progress_phase") != phase
+            or item.get("progress_summary", "") != clean_summary
+        )
+        sequence = int(item.get("progress_sequence") or 0)
+        if changed or sequence < 1:
+            sequence += 1
+            item["progress_phase"] = phase
+            item["progress_summary"] = clean_summary
+            item["progress_sequence"] = sequence
+            _write(data)
+        return {
+            "inbox_item_id": int(item["inbox_item_id"]),
+            "phase": phase,
+            "summary": clean_summary or None,
+            "sequence": sequence,
+            "started_at": float(item.get("created_ts") or time.time()),
+        }
 
 
 def attach_context_pack(

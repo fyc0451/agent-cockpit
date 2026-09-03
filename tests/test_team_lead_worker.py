@@ -280,7 +280,7 @@ def test_startup_discards_retired_queue_state(_state, version):
     team_lead_worker.reset_notifications()
 
     assert json.loads(_state.read_text()) == {
-        "version": 6, "work_items": [], "consult_requests": [],
+        "version": 7, "work_items": [], "consult_requests": [],
         "reply_evidence": [],
     }
     assert stat.S_IMODE(_state.stat().st_mode) == 0o600
@@ -296,9 +296,41 @@ def test_startup_migrates_v5_without_dropping_pending_work(_state):
     team_lead_worker.reset_notifications()
 
     migrated = json.loads(_state.read_text())
-    assert migrated["version"] == 6
+    assert migrated["version"] == 7
     assert migrated["reply_evidence"] == []
     assert migrated["work_items"][0]["work_id"] == work_id
+
+
+def test_progress_has_stable_sequence_and_suppresses_preexisting_pane_text():
+    team_lead_worker.poll_binding(
+        _binding(), _candidate(), claim=lambda *_args: _claim(),
+        notify=lambda *_args: True,
+        now=100.0,
+    )
+
+    waiting = team_lead_worker.update_progress(
+        _binding(), phase="waiting", summary="上一轮遗留的旧进度，不应展示。",
+    )
+    assert waiting == {
+        "inbox_item_id": 31,
+        "phase": "waiting",
+        "summary": None,
+        "sequence": 1,
+        "started_at": 100.0,
+    }
+    unchanged_old = team_lead_worker.update_progress(
+        _binding(), phase="working", summary="上一轮遗留的旧进度，不应展示。",
+    )
+    assert unchanged_old["summary"] is None
+    assert unchanged_old["sequence"] == 2
+    current = team_lead_worker.update_progress(
+        _binding(), phase="working", summary="当前正在核对新的团队请求。",
+    )
+    replay = team_lead_worker.update_progress(
+        _binding(), phase="working", summary="当前正在核对新的团队请求。",
+    )
+    assert current["summary"] == "当前正在核对新的团队请求。"
+    assert current["sequence"] == replay["sequence"] == 3
 
 
 def test_expired_claim_is_renewed_for_same_inbox_item():

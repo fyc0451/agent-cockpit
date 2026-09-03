@@ -955,6 +955,7 @@ TEAM_API_ROUTES = (
     (re.compile(r"^projects/[A-Za-z0-9_-]+/agent-bindings/[0-9]+$"), {"DELETE"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/reply-requests$"), {"GET"}),
     (re.compile(r"^projects/[A-Za-z0-9_-]+/reply-requests/[0-9]+/(?:approve|reject)$"), {"POST"}),
+    (re.compile(r"^projects/[A-Za-z0-9_-]+/progress$"), {"GET"}),
 )
 VALID_AGENTS = {"codex", "kimi", "claude", "qoder", "qodercli", "qodercn", "grok", "opencode"}
 VALID_LAYOUTS = {"right", "horizontal", "down", "vertical", "tab"}
@@ -5551,20 +5552,6 @@ def _team_lead_worker_tick() -> None:
             if runtime_status == "done":
                 runtime_status = "idle"
             try:
-                hub_client.session_lead_status(
-                    str(binding["project_slug"]),
-                    {
-                        "client_session_id": str(binding["client_session_id"]),
-                        "reply_token": str(binding["reply_token"]),
-                        "status": runtime_status,
-                    },
-                )
-            except hub_client.HumanAPIError as exc:
-                if exc.status_code not in {403, 409}:
-                    logger.warning("Team Lead 状态心跳暂时失败: HTTP %s", exc.status_code)
-            except Exception:
-                logger.exception("Team Lead 状态心跳失败")
-            try:
                 team_work_command = None
                 if (
                     binding.get("managed_runtime") is True
@@ -5586,6 +5573,42 @@ def _team_lead_worker_tick() -> None:
                     logger.warning("Team Lead 收件暂时失败: HTTP %s", exc.status_code)
             except Exception:
                 logger.exception("Team Lead 本地 worker tick 失败")
+            progress = None
+            try:
+                active_work = team_lead_worker.next_for_binding(binding)
+                if active_work is not None:
+                    summary = herdr_client.pane_summary(
+                        str(binding["session"]), str(lead.get("pane_id") or ""), 80,
+                    )
+                    progress_text = pane_live.extract_live_progress(
+                        str(summary.get("summary") or "") if isinstance(summary, dict) else "",
+                        str(lead.get("agent") or ""),
+                    )
+                    phase = (
+                        "blocked" if runtime_status == "blocked"
+                        else "working" if runtime_status == "working"
+                        else "waiting"
+                    )
+                    progress = team_lead_worker.update_progress(
+                        binding, phase=phase, summary=progress_text,
+                    )
+            except Exception:
+                logger.exception("Team Lead 安全进度采集失败")
+            try:
+                hub_client.session_lead_status(
+                    str(binding["project_slug"]),
+                    {
+                        "client_session_id": str(binding["client_session_id"]),
+                        "reply_token": str(binding["reply_token"]),
+                        "status": runtime_status,
+                        "progress": progress,
+                    },
+                )
+            except hub_client.HumanAPIError as exc:
+                if exc.status_code not in {403, 409}:
+                    logger.warning("Team Lead 状态心跳暂时失败: HTTP %s", exc.status_code)
+            except Exception:
+                logger.exception("Team Lead 状态心跳失败")
         try:
             _notify_pending_project_consults()
         except Exception:

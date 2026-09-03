@@ -2796,6 +2796,67 @@
   font-size: 12px;
 }
 
+.gc-team-progress {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--gc-line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--gc-bg) 88%, var(--gc-accent) 12%);
+  color: var(--gc-text2);
+  font-size: 12px;
+}
+
+.gc-team-progress summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.gc-team-progress summary::-webkit-details-marker {
+  display: none;
+}
+
+.gc-team-progress summary small {
+  margin-left: auto;
+  color: var(--gc-text3);
+}
+
+.gc-team-progress-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gc-text3);
+}
+
+.gc-team-progress-dot.is-working {
+  background: var(--gc-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--gc-accent) 20%, transparent);
+}
+
+.gc-team-progress-dot.is-blocked {
+  background: var(--gc-danger, #d97706);
+}
+
+.gc-team-progress-history {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--gc-line);
+}
+
+.gc-team-progress-history > div {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.gc-team-progress-history time {
+  color: var(--gc-text3);
+}
+
 .gc-team-reply-note {
   margin-top: 8px;
 }

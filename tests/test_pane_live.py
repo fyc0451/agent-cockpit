@@ -83,6 +83,25 @@ def test_extract_live_progress_keeps_codex_status_not_tool_chrome():
     assert "5.7 MB" in pane_live.extract_live_progress(wrapped, "codex")
 
 
+def test_extract_live_progress_uses_agent_specific_safe_adapters():
+    kimi = (
+        "● Used Read (secret.env) · 10 lines\n"
+        "● 已完成数据结构核对，正在整理可以直接执行的修复步骤。\n"
+    )
+    claude = (
+        "● Bash(git status)\n"
+        "● 已定位状态同步的竞态条件，接下来补充回归测试。\n"
+    )
+    assert pane_live.extract_live_progress(kimi, "kimi") == (
+        "已完成数据结构核对，正在整理可以直接执行的修复步骤。"
+    )
+    assert pane_live.extract_live_progress(claude, "claude") == (
+        "已定位状态同步的竞态条件，接下来补充回归测试。"
+    )
+    assert pane_live.extract_live_progress("● 正在读取 /home/fyc/.env token=abc", "kimi") == ""
+    assert pane_live.extract_live_progress("anything", "unknown-agent") == ""
+
+
 def test_snapshot_from_envelope_uses_matched_read():
     snap = pane_live.snapshot_from_envelope({
         "event": "pane.output_matched",

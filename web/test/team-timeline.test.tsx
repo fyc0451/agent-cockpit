@@ -403,6 +403,47 @@ describe('TeamTimeline', () => {
     ))).toBe(true)
   })
 
+  it('把短时 Agent 进度展示在对应提问下并允许展开历史', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/chat/messages')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ messages: [message(42, '请检查这条问题')] }),
+        } as Response
+      }
+      if (url.endsWith('/progress')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            progress: [{
+              message_id: 42,
+              agent_name: 'TopazOwl',
+              phase: 'working',
+              summary: '正在对比两组测试结果。',
+              sequence: 2,
+              started_at: new Date(Date.now() - 4_000).toISOString(),
+              updated_at: new Date().toISOString(),
+            }],
+          }),
+        } as Response
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    }))
+
+    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, {
+      wrapper: createWrapper(),
+    })
+
+    const card = await screen.findByTestId('team-progress-42')
+    expect(within(card).getByText('TopazOwl · 正在处理')).toBeInTheDocument()
+    expect(within(card).getByText('正在对比两组测试结果。')).toBeInTheDocument()
+    expect(within(screen.getByTestId('team-msg-42')).getByText('请检查这条问题')).toBeInTheDocument()
+    expect(card).toHaveAttribute('open')
+  })
+
   it('自动回复模式不显示旧的逐条确认按钮', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)

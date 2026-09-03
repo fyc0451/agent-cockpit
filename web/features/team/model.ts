@@ -62,6 +62,16 @@ export interface TeamReplyRequest {
   decidedAt: string | null
 }
 
+export interface TeamProgress {
+  messageId: number
+  agentName: string | null
+  phase: 'working' | 'waiting' | 'blocked'
+  summary: string | null
+  sequence: number
+  startedAt: string
+  updatedAt: string
+}
+
 export interface TeamSessionCandidate {
   name: string // Session 名
   label: string // 显示标签

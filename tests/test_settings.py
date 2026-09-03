@@ -397,6 +397,10 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         "/api/team/projects/demo/reply-requests",
         headers=headers,
     ).status_code == 200
+    assert client.get(
+        "/api/team/projects/demo/progress",
+        headers=headers,
+    ).status_code == 200
     assert client.post(
         "/api/team/projects/demo/reply-requests/12/approve",
         headers=headers,
@@ -455,6 +459,12 @@ def test_team_proxy_only_forwards_allowlisted_human_api(monkeypatch):
         (
             "GET",
             "/hub/api/projects/demo/reply-requests",
+            "Bearer human.jwt",
+            None,
+        ),
+        (
+            "GET",
+            "/hub/api/projects/demo/progress",
             "Bearer human.jwt",
             None,
         ),
