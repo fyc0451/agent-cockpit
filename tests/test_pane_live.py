@@ -102,6 +102,18 @@ def test_extract_live_progress_uses_agent_specific_safe_adapters():
     assert pane_live.extract_live_progress("anything", "unknown-agent") == ""
 
 
+def test_live_progress_rejects_common_secrets_commands_and_relative_paths():
+    unsafe = (
+        "正在配置 AKIAIOSFODNN7EXAMPLE 供服务使用。",
+        "正在检查 eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.signaturevalue。",
+        "正在使用 ghp_abcdefghijklmnopqrstuvwxyz123456 完成验证。",
+        "正在运行 npm test 验证界面行为。",
+        "正在读取 src/agent_cockpit/server.py 定位问题。",
+    )
+    for summary in unsafe:
+        assert pane_live.sanitize_live_progress(summary) == ""
+
+
 def test_snapshot_from_envelope_uses_matched_read():
     snap = pane_live.snapshot_from_envelope({
         "event": "pane.output_matched",

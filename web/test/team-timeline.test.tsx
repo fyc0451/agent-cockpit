@@ -3,7 +3,12 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as teamLedger from '../api/teamLedger'
-import { formatTeamTimestamp, TeamTimeline } from '../features/team/TeamTimeline'
+import {
+  formatTeamTimestamp,
+  mergeTeamProgressHistory,
+  TeamTimeline,
+} from '../features/team/TeamTimeline'
+import type { TeamProgress } from '../features/team/model'
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -37,6 +42,27 @@ function message(
 describe('TeamTimeline', () => {
   beforeEach(() => vi.unstubAllGlobals())
   afterEach(() => vi.useRealTimers())
+
+  it('进度历史只保留当前消息且每条最多十项', () => {
+    const progressRows: TeamProgress[] = Array.from({ length: 12 }, (_, index) => ({
+      messageId: 42,
+      agentName: 'TopazOwl',
+      phase: 'working',
+      summary: `步骤 ${index + 1}`,
+      sequence: index + 1,
+      startedAt: '2026-09-03T07:00:00Z',
+      updatedAt: `2026-09-03T07:00:${String(index).padStart(2, '0')}Z`,
+    }))
+    const stale: TeamProgress = { ...progressRows[0], messageId: 7 }
+
+    const result = mergeTeamProgressHistory({ 7: [stale] }, progressRows, [42])
+
+    expect(result[7]).toBeUndefined()
+    expect(result[42]).toHaveLength(10)
+    expect(result[42].map((item) => item.sequence)).toEqual([
+      3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ])
+  })
 
   it('发送和历史只走远端 Team Hub，不写本机群账本', async () => {
     const listed: Array<Record<string, unknown>> = []

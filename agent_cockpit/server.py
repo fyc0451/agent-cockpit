@@ -5595,14 +5595,19 @@ def _team_lead_worker_tick() -> None:
             except Exception:
                 logger.exception("Team Lead 安全进度采集失败")
             try:
+                status_payload = {
+                    "client_session_id": str(binding["client_session_id"]),
+                    "reply_token": str(binding["reply_token"]),
+                    "status": runtime_status,
+                }
+                # Omit the optional field when there is no fresh sample. This
+                # remains compatible with older Hubs and avoids clearing a
+                # still-valid overlay after a transient pane read failure.
+                if progress is not None:
+                    status_payload["progress"] = progress
                 hub_client.session_lead_status(
                     str(binding["project_slug"]),
-                    {
-                        "client_session_id": str(binding["client_session_id"]),
-                        "reply_token": str(binding["reply_token"]),
-                        "status": runtime_status,
-                        "progress": progress,
-                    },
+                    status_payload,
                 )
             except hub_client.HumanAPIError as exc:
                 if exc.status_code not in {403, 409}:

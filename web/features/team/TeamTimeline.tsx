@@ -110,6 +110,31 @@ function progressElapsed(startedAt: string): string {
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
 }
 
+export function mergeTeamProgressHistory(
+  current: Record<number, TeamProgress[]>,
+  progressRows: TeamProgress[],
+  visibleMessageIds: number[],
+): Record<number, TeamProgress[]> {
+  const visibleIds = new Set(visibleMessageIds)
+  const next: Record<number, TeamProgress[]> = {}
+  for (const [messageId, history] of Object.entries(current)) {
+    if (visibleIds.has(Number(messageId))) next[Number(messageId)] = history
+  }
+  for (const progress of progressRows) {
+    if (!visibleIds.has(progress.messageId)) continue
+    const history = next[progress.messageId] ?? []
+    const previous = history[history.length - 1]
+    if (
+      !previous
+      || previous.sequence !== progress.sequence
+      || previous.agentName !== progress.agentName
+    ) {
+      next[progress.messageId] = [...history, progress].slice(-10)
+    }
+  }
+  return next
+}
+
 function TeamProgressCard({
   progress,
   history,
@@ -317,25 +342,6 @@ export function TeamTimeline({
   }, [topic])
 
   useEffect(() => {
-    if (!progressQ.data) return
-    setProgressHistory((current) => {
-      const next = { ...current }
-      for (const progress of progressQ.data) {
-        const history = next[progress.messageId] ?? []
-        const previous = history[history.length - 1]
-        if (
-          !previous
-          || previous.sequence !== progress.sequence
-          || previous.agentName !== progress.agentName
-        ) {
-          next[progress.messageId] = [...history, progress].slice(-10)
-        }
-      }
-      return next
-    })
-  }, [progressQ.data])
-
-  useEffect(() => {
     const available = new Set(availableHandleKey.split('|').filter(Boolean))
     setSelectedHandles((current) => current.filter(
       (handle) => available.has(handle.toLowerCase()),
@@ -517,6 +523,14 @@ export function TeamTimeline({
   const activeProgress = new Map(
     (progressQ.data ?? []).map((progress) => [progress.messageId, progress]),
   )
+
+  useEffect(() => {
+    setProgressHistory((current) => mergeTeamProgressHistory(
+      current,
+      progressQ.data ?? [],
+      rows.map((row) => row.id),
+    ))
+  }, [historyKey, progressQ.data])
 
   const replyStatusText = (status: string) => {
     if (status === 'awaiting_confirmation' && binding?.replyMode === 'auto') {

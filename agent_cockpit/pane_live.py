@@ -165,11 +165,19 @@ _BULLET_TOOL_PREFIXES = (
     "Ran ", "Now I see", "Compacted", "background ", "recap:",
 )
 _UNSAFE_PROGRESS_RE = re.compile(
-    r"(?:https?://|`|```|(?:^|\s)(?:ssh|sudo|curl|wget|git|python\d*)\s|"
+    r"(?:https?://|`|```|(?:^|\s)(?:ssh|sudo|curl|wget|git|python\d*|"
+    r"npm|npx|pnpm|yarn|node|docker|podman|kubectl|rm|cp|mv|cat|sed|"
+    r"awk|rg|grep|find|bash|sh|zsh)\s|"
     r"/(?:home|Users|root|etc|var|opt|mnt)/|(?:[A-Za-z]:\\)|"
+    r"(?:^|\s)(?:\.{0,2}/)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|"
     r"\b(?:password|passwd|secret|token|api[_ -]?key|authorization|credential)\b|"
     r"(?:密码|密钥|令牌|凭据)|\b[A-Za-z_][A-Za-z0-9_]{2,}=\S+|"
-    r"\b(?:\d{1,3}\.){3}\d{1,3}\b|[A-Fa-f0-9]{32,}|[A-Za-z0-9_-]{48,})",
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b|"
+    r"\b(?:A3T[A-Z0-9]|AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)"
+    r"[A-Z0-9]{16}\b|"
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b|"
+    r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|"
+    r"[A-Fa-f0-9]{32,}|[A-Za-z0-9_-]{48,})",
     re.IGNORECASE,
 )
 

@@ -630,7 +630,43 @@ def test_worker_tick_wakes_running_done_lead(monkeypatch, reply_mode):
         "client_session_id": "client-1",
         "reply_token": "reply-secret",
         "status": "idle",
-        "progress": None,
+    })]
+
+
+def test_worker_tick_pane_failure_keeps_previous_progress(monkeypatch):
+    _prepare(monkeypatch)
+    monkeypatch.setattr(server, "_team_session_candidates", lambda: [{
+        "session": "demo", "generation": "run-1", "mail_project": PROJECT,
+        "ready": True, "status": "working",
+        "lead": {
+            "agent": "codex", "mail_name": "codex-main",
+            "pane_id": "pane-1", "status": "working",
+        },
+    }])
+    monkeypatch.setattr(server.team_lead_worker, "poll_binding", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "next_for_binding",
+        lambda _binding: {"work_id": "a" * 32},
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("temporary read failure")),
+    )
+    statuses = []
+    monkeypatch.setattr(
+        server.hub_client,
+        "session_lead_status",
+        lambda slug, payload: statuses.append((slug, payload)) or {},
+    )
+
+    server._team_lead_worker_tick()
+
+    assert statuses == [("core", {
+        "client_session_id": "client-1",
+        "reply_token": "reply-secret",
+        "status": "working",
     })]
 
 
