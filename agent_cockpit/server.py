@@ -6989,6 +6989,7 @@ _PANE_LAST_MESSAGE: dict[tuple[str, str], str] = {}
 _PANE_TURN_STARTED: dict[tuple[str, str], int] = {}
 _PANE_ACTIVITY: dict[tuple[str, str], str] = {}
 _PANE_ACTIVITY_AT: dict[tuple[str, str], float] = {}
+_PANE_ACTIVITY_REFRESH_S = 3.0
 _PANE_IDLE_SINCE: dict[tuple[str, str], float] = {}
 _PANE_LAST_REVISION: dict[tuple[str, str], int] = {}
 _QUEUE_IDLE_SETTLE_S = 2.0
@@ -7837,13 +7838,38 @@ def _trim_chat_mail(
     )
 
 
+def _refresh_pane_activity(session: str, pane: dict[str, Any]) -> None:
+    """从只读 pane 快照提取一行安全进度；不调用会扰动画面的 agent read。"""
+    kind = str(pane.get("agent") or "").strip().lower()
+    if kind not in {"codex", "claude", "kimi"}:
+        return
+    pane_id = str(pane.get("pane_id") or "")
+    if not session or not pane_id:
+        return
+    key = (session, pane_id)
+    now = time.monotonic()
+    if now - _PANE_ACTIVITY_AT.get(key, 0.0) < _PANE_ACTIVITY_REFRESH_S:
+        return
+    _PANE_ACTIVITY_AT[key] = now
+    try:
+        raw = herdr_client.pane_read(session, pane_id, 100, False)
+    except Exception:
+        return
+    progress = pane_live.extract_live_progress(
+        pane_live.extract_pane_text(raw), kind,
+    )
+    if progress:
+        _PANE_ACTIVITY[key] = progress
+
+
 def _pane_activity_line(pane: dict[str, Any]) -> str:
-    """干活时给瀑布流一行现在在干什么，不读整屏终端。"""
+    """干活时给瀑布流一行安全活动摘要，不把整屏终端暴露给页面。"""
     status = str(pane.get("agent_status") or "")
     if status == "blocked":
         return "等你输入"
     session = str(pane.get("session") or "")
     pane_id = str(pane.get("pane_id") or "")
+    _refresh_pane_activity(session, pane)
     cached = _PANE_ACTIVITY.get((session, pane_id), "").strip()
     if cached:
         return cached

@@ -3664,6 +3664,7 @@ def test_board_snapshot_exposes_turn_and_unread(isolated_ledger, monkeypatch):
     server._PANE_LAST_STATUS.clear()
     server._PANE_TURN_STARTED.clear()
     server._PANE_ACTIVITY.clear()
+    server._PANE_ACTIVITY_AT.clear()
     server._HARVEST_STATUS_LOADED = True
     runtime = {
         "available": False,
@@ -3695,6 +3696,7 @@ def test_board_snapshot_blocked_activity_is_waiting_for_input(isolated_ledger, m
     server._PANE_LAST_STATUS.clear()
     server._PANE_TURN_STARTED.clear()
     server._PANE_ACTIVITY.clear()
+    server._PANE_ACTIVITY_AT.clear()
     server._HARVEST_STATUS_LOADED = True
     runtime = {
         "available": False,
@@ -3721,6 +3723,7 @@ def test_board_snapshot_uses_codex_progress_not_tool_chrome(isolated_ledger, mon
     server._PANE_LAST_STATUS.clear()
     server._PANE_TURN_STARTED.clear()
     server._PANE_ACTIVITY.clear()
+    server._PANE_ACTIVITY_AT.clear()
     server._HARVEST_STATUS_LOADED = True
     runtime = {
         "available": False,
@@ -3740,30 +3743,64 @@ def test_board_snapshot_uses_codex_progress_not_tool_chrome(isolated_ledger, mon
     monkeypatch.setattr(server, "_merge_descriptor_roster", lambda snap: snap)
     monkeypatch.setattr(server, "_reconcile_absent_panes", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_prune_harvest_for_snapshot", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        server.herdr_client,
-        "pane_summary",
-        lambda *_a, **_k: {"summary": (
+    calls = []
+
+    def read_progress(session, pane_id, lines, is_agent):
+        calls.append((session, pane_id, lines, is_agent))
+        return {"output": (
             "• Waited for background terminal · ssh badge-dev\n"
             "• 固定源码包已下载到约 5.7 MB，连接稳定但带宽偏低。"
             "发布过程没有切换 current。\n"
             "• Ran ssh badge-dev\n"
-        )},
-    )
-    called = {"n": 0}
+        )}
 
-    def boom(*_a, **_k):
-        called["n"] += 1
-        raise AssertionError("working 时不得读 Codex 终端")
-
-    monkeypatch.setattr(server.herdr_client, "pane_summary", boom)
-    monkeypatch.setattr(server.herdr_client, "pane_read", boom)
+    monkeypatch.setattr(server.herdr_client, "pane_read", read_progress)
     snap = server._board_snapshot()
-    assert snap["panes"][0]["activity"] == "正在回复"
-    assert called["n"] == 0
+    assert snap["panes"][0]["activity"] == (
+        "固定源码包已下载到约 5.7 MB，连接稳定但带宽偏低。发布过程没有切换 current。"
+    )
+    assert calls == [("chat-codex", "w1:p2", 100, False)]
+    server._board_snapshot()
+    assert len(calls) == 1
     server._harvest_settled_replies("chat-codex", runtime)
     assert chat_ledger.list_messages("chat-codex") == []
-    assert called["n"] == 0
+
+
+def test_board_snapshot_live_progress_fail_closed_and_keeps_previous(
+    isolated_ledger, monkeypatch,
+):
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._PANE_ACTIVITY.clear()
+    server._PANE_ACTIVITY_AT.clear()
+    server._HARVEST_STATUS_LOADED = True
+    runtime = {
+        "available": False,
+        "sessions": [],
+        "panes": [{
+            "session": "chat-kimi",
+            "pane_id": "w1:p3",
+            "agent": "kimi",
+            "agent_status": "working",
+            "mail_name": "BlueLake",
+            "display_name": "kimi-1",
+        }],
+    }
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: runtime)
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(server, "_merge_descriptor_roster", lambda snap: snap)
+    monkeypatch.setattr(server, "_reconcile_absent_panes", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_prune_harvest_for_snapshot", lambda *_a, **_k: None)
+    server._PANE_ACTIVITY[("chat-kimi", "w1:p3")] = "正在核对现有行为"
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_read",
+        lambda *_a, **_k: {"output": "● 读取 /home/fyc/.env token=secret-value"},
+    )
+
+    snap = server._board_snapshot()
+
+    assert snap["panes"][0]["activity"] == "正在核对现有行为"
 
 
 def test_unread_ignores_undelivered_and_read_mail(isolated_ledger, monkeypatch):
