@@ -3743,25 +3743,29 @@ def test_board_snapshot_uses_codex_progress_not_tool_chrome(isolated_ledger, mon
     monkeypatch.setattr(server, "_merge_descriptor_roster", lambda snap: snap)
     monkeypatch.setattr(server, "_reconcile_absent_panes", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_prune_harvest_for_snapshot", lambda *_a, **_k: None)
-    calls = []
-
-    def read_progress(session, pane_id, lines, is_agent):
-        calls.append((session, pane_id, lines, is_agent))
-        return {"output": (
-            "• Waited for background terminal · ssh badge-dev\n"
-            "• 固定源码包已下载到约 5.7 MB，连接稳定但带宽偏低。"
-            "发布过程没有切换 current。\n"
-            "• Ran ssh badge-dev\n"
-        )}
-
-    monkeypatch.setattr(server.herdr_client, "pane_read", read_progress)
+    runtime["panes"][0]["agent_session"] = {
+        "agent": "codex", "kind": "id", "value": "01a02877-ca29-73a1-87c2-3bd629ba288f",
+    }
+    monkeypatch.setattr(
+        server.herdr_client,
+        "latest_codex_commentary",
+        lambda *_a, **_k: {"messages": [
+            {"text": "Ran ssh badge-dev"},
+            {"text": "固定源码包已下载到约 5.7 MB，连接稳定但带宽偏低。发布过程没有切换 current。"},
+        ]},
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_read",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("结构化过程可用时不得再读 pane"),
+        ),
+    )
     snap = server._board_snapshot()
     assert snap["panes"][0]["activity"] == (
         "固定源码包已下载到约 5.7 MB，连接稳定但带宽偏低。发布过程没有切换 current。"
     )
-    assert calls == [("chat-codex", "w1:p2", 100, False)]
     server._board_snapshot()
-    assert len(calls) == 1
     server._harvest_settled_replies("chat-codex", runtime)
     assert chat_ledger.list_messages("chat-codex") == []
 

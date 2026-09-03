@@ -548,6 +548,47 @@ def test_latest_codex_final_reply_uses_current_turn_structured_message(tmp_path)
     }
 
 
+def test_latest_codex_commentary_returns_current_turn_newest_first(tmp_path):
+    home = tmp_path / "private-codex"
+    home.mkdir(mode=0o700)
+    session_id = "01a02877-ca29-73a1-87c2-3bd629ba288f"
+    rollout = home / "sessions" / "2026" / "08" / "22" / f"rollout-{session_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+
+    def row(phase, text, created):
+        return json.dumps({
+            "timestamp": f"1970-01-01T00:00:{created:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "role": "assistant",
+                "phase": phase,
+                "content": [{"type": "output_text", "text": text}],
+            },
+        })
+
+    rollout.write_text("\n".join([
+        row("commentary", "上一轮旧过程", 10),
+        row("commentary", "本轮第一条过程", 20),
+        row("final_answer", "不应作为过程返回", 21),
+        row("commentary", "本轮最新过程", 22),
+    ]) + "\n", encoding="utf-8")
+    herdr_client._CODEX_ROLLOUT_CACHE.clear()
+
+    result = herdr_client.latest_codex_commentary(
+        {"agent": "codex", "kind": "id", "value": session_id},
+        since_ms=15_000,
+        codex_home=str(home),
+    )
+
+    assert result == {
+        "available": True,
+        "messages": [
+            {"text": "本轮最新过程", "created_ms": 22_000},
+            {"text": "本轮第一条过程", "created_ms": 20_000},
+        ],
+    }
+
+
 @pytest.mark.parametrize(
     ("agent", "kind"),
     [

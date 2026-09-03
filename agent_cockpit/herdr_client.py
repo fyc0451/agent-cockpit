@@ -1068,6 +1068,81 @@ _CODEX_SESSION_ID_RE = re.compile(r"[0-9a-fA-F-]{36}")
 _CODEX_ROLLOUT_CACHE: dict[tuple[str, str], Path] = {}
 
 
+def latest_codex_commentary(
+    agent_session: object,
+    *,
+    since_ms: int,
+    codex_home: object = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Read recent structured Codex commentary without touching its terminal."""
+    if not isinstance(agent_session, dict):
+        return {"available": False, "messages": []}
+    if agent_session.get("agent") != "codex" or agent_session.get("kind") != "id":
+        return {"available": False, "messages": []}
+    session_id = str(agent_session.get("value") or "")
+    if _CODEX_SESSION_ID_RE.fullmatch(session_id) is None:
+        return {"available": False, "messages": []}
+    try:
+        home = (
+            Path(_validate_workspace_codex_home(codex_home))
+            if codex_home is not None
+            else _user_default_codex_home()
+        )
+    except (OSError, ValueError):
+        return {"available": False, "messages": []}
+    cache_key = (str(home), session_id)
+    path = _CODEX_ROLLOUT_CACHE.get(cache_key)
+    if path is None or not path.is_file():
+        matches = list(home.glob(f"sessions/*/*/*/*{session_id}.jsonl"))
+        matches.extend(home.glob(f"archived_sessions/*{session_id}.jsonl"))
+        if not matches:
+            return {"available": False, "messages": []}
+        path = max(matches, key=lambda item: item.stat().st_mtime_ns)
+        _CODEX_ROLLOUT_CACHE[cache_key] = path
+    try:
+        with path.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - 8 * 1024 * 1024))
+            if stream.tell() > 0:
+                stream.readline()
+            lines = stream.read().splitlines()
+    except OSError:
+        return {"available": False, "messages": []}
+    messages: list[dict[str, Any]] = []
+    for raw_line in reversed(lines):
+        try:
+            row = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        payload = row.get("payload") if isinstance(row, dict) else None
+        if not isinstance(payload, dict) or row.get("type") != "response_item":
+            continue
+        if payload.get("role") != "assistant" or payload.get("phase") != "commentary":
+            continue
+        try:
+            created_ms = int(
+                datetime.fromisoformat(
+                    str(row.get("timestamp")).replace("Z", "+00:00"),
+                ).timestamp() * 1000
+            )
+        except (TypeError, ValueError):
+            continue
+        if created_ms < since_ms:
+            break
+        content = payload.get("content")
+        text = "".join(
+            str(item.get("text") or "")
+            for item in (content if isinstance(content, list) else [])
+            if isinstance(item, dict) and item.get("type") == "output_text"
+        ).strip()
+        if text:
+            messages.append({"text": text, "created_ms": created_ms})
+        if len(messages) >= max(1, min(limit, 20)):
+            break
+    return {"available": True, "messages": messages}
+
+
 def latest_codex_final_reply(
     agent_session: object,
     *,

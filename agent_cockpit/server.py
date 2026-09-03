@@ -7851,6 +7851,21 @@ def _refresh_pane_activity(session: str, pane: dict[str, Any]) -> None:
     if now - _PANE_ACTIVITY_AT.get(key, 0.0) < _PANE_ACTIVITY_REFRESH_S:
         return
     _PANE_ACTIVITY_AT[key] = now
+    if kind == "codex":
+        started_ms = _PANE_TURN_STARTED.get(key)
+        if started_ms is not None:
+            structured = herdr_client.latest_codex_commentary(
+                pane.get("agent_session"),
+                since_ms=started_ms,
+                codex_home=pane.get("codex_home"),
+            )
+            for message in structured.get("messages") or []:
+                progress = pane_live.sanitize_live_progress(
+                    str(message.get("text") or ""),
+                )
+                if progress:
+                    _PANE_ACTIVITY[key] = progress
+                    return
     try:
         raw = herdr_client.pane_read(session, pane_id, 100, False)
     except Exception:
