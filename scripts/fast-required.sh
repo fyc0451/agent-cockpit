@@ -24,6 +24,11 @@ umask 077
 # Test modules import the server before pytest fixtures run. Ignore any live
 # source-profile inherited from the developer shell so collection matches CI.
 unset COCKPIT_NEXT_PROFILE
+# Agent Mail paths are also resolved while modules are imported. Keep the
+# required gate completely outside the real Hub database and user registry.
+export AGENT_MAIL_DB_PATH="$pytest_temp/agent-mail/storage.sqlite3"
+export AGENT_MAIL_REGISTRY_DIR="$pytest_temp/agent-mail/registry"
+export AGENT_MAIL_CLIENT_ENV="$pytest_temp/agent-mail/client.env"
 "${pytest_command[@]}" -q --basetemp="$pytest_temp" \
   tests/test_auth_session.py \
   tests/test_security.py \

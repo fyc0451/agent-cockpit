@@ -3582,13 +3582,50 @@ def api_uploads():
 
 # ── 版本 / Release ──────────────────────────────────────────────
 
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _source_checkout_sha() -> str | None:
+    if getattr(sys, "frozen", False):
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT_DIR), "rev-parse", "--verify", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = result.stdout.strip().lower() if result.returncode == 0 else ""
+    return value if _SOURCE_SHA_RE.fullmatch(value) else None
+
+
 @app.get("/api/version")
 def api_version(refresh: bool = Query(False)):
     """当前版本 + GitHub latest Release 状态（需 Cockpit 认证，非 PUBLIC）。
 
     refresh=true 绕过 6h 缓存；网络/解析失败时仍 200 且 status=unavailable。
     """
-    return version.get_version_info(refresh=refresh)
+    info = version.get_version_info(refresh=refresh)
+    current = info.get("current")
+    if not isinstance(current, dict):
+        return info
+    try:
+        identity = release_identity.get_release_identity()
+    except Exception:
+        identity = {}
+    runtime_sha = identity.get("source_sha")
+    if not isinstance(runtime_sha, str):
+        runtime_sha = None
+    checkout_sha = _source_checkout_sha()
+    current["source_sha"] = runtime_sha
+    current["checkout_sha"] = checkout_sha
+    current["restart_required"] = bool(
+        runtime_sha
+        and runtime_sha != "unknown"
+        and checkout_sha
+        and runtime_sha != checkout_sha
+    )
+    return info
 
 
 @app.get("/api/upgrade/status")
@@ -4100,7 +4137,12 @@ def _raise_human_auth_error(exc: hub_client.HumanAuthError) -> None:
     raise HTTPException(exc.status_code, exc.detail) from exc
 
 
-_REGISTRY_ROOT = Path.home() / ".agent-mail" / "registry"
+_registry_root_override = os.environ.get("AGENT_MAIL_REGISTRY_DIR", "").strip()
+_REGISTRY_ROOT = (
+    Path(_registry_root_override).expanduser()
+    if _registry_root_override
+    else Path.home() / ".agent-mail" / "registry"
+)
 _REGISTRY_DIR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _REGISTRY_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}--[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.json$")
 _REGISTRY_ID_RE = re.compile(
@@ -10460,20 +10502,21 @@ def _retry_pending_agent_retirements() -> dict[str, Any]:
     requested = [str(item.get("instance_id") or "") for item in pending]
     if not requested:
         return {
-            "requested": [], "retired": [], "orphaned": [], "pending": [],
-            "errors": {}, "complete": True,
+            "requested": [], "restored": [], "retired": [], "orphaned": [],
+            "pending": [], "errors": {}, "complete": True,
         }
 
     snap = herdr_client.snapshot()
     if snap.get("available") is not True:
         error = str(snap.get("error") or "Herdr snapshot 不可用")
         return {
-            "requested": requested, "retired": [], "orphaned": [],
-            "pending": requested, "errors": dict.fromkeys(requested, error),
-            "complete": False,
+            "requested": requested, "restored": [], "retired": [],
+            "orphaned": [], "pending": requested,
+            "errors": dict.fromkeys(requested, error), "complete": False,
         }
 
     live_instances: set[str] = set()
+    live_instance_locations: dict[str, set[tuple[str, str]]] = {}
     live_locations: set[tuple[str, str]] = set()
     for session in snap.get("sessions", []):
         if not isinstance(session, dict):
@@ -10484,7 +10527,13 @@ def _retry_pending_agent_retirements() -> dict[str, Any]:
                 continue
             name = str(agent.get("name") or "")
             try:
-                live_instances.add(herdr_client.validate_agent_instance_id(name))
+                instance_id = herdr_client.validate_agent_instance_id(name)
+                live_instances.add(instance_id)
+                pane_id = str(agent.get("pane_id") or "")
+                if session_name and pane_id:
+                    live_instance_locations.setdefault(instance_id, set()).add(
+                        (session_name, pane_id),
+                    )
             except ValueError:
                 # 旧/受限快照可能没有 runtime name，此时才用位置保守兜底。
                 pane_id = str(agent.get("pane_id") or "")
@@ -10497,6 +10546,7 @@ def _retry_pending_agent_retirements() -> dict[str, Any]:
         if isinstance(instance_id, str):
             registry_by_instance.setdefault(instance_id, []).append(identity)
 
+    restored: list[str] = []
     retired: list[str] = []
     orphaned: list[str] = []
     still_pending: list[str] = []
@@ -10510,9 +10560,35 @@ def _retry_pending_agent_retirements() -> dict[str, Any]:
             str(descriptor.get("session") or ""),
             str(descriptor.get("pane_id") or ""),
         )
+        if instance_id in live_instances:
+            locations = live_instance_locations.get(instance_id, set())
+            workdir = str(descriptor.get("workdir") or "").strip()
+            if len(locations) != 1 or not workdir:
+                still_pending.append(instance_id)
+                errors[instance_id] = (
+                    "live instance 的运行位置不唯一或 descriptor 缺少 workdir，拒绝恢复"
+                )
+                continue
+            live_session, live_pane = next(iter(locations))
+            try:
+                rebound = herdr_client.rebind_live_launch_descriptor(
+                    instance_id=instance_id,
+                    session=live_session,
+                    pane_id=live_pane,
+                    workdir=workdir,
+                    mail_name=str(descriptor.get("mail_name") or "") or None,
+                )
+            except (OSError, ValueError) as exc:
+                rebound = None
+                errors[instance_id] = str(exc)
+            if rebound and rebound.get("state") == "active":
+                restored.append(instance_id)
+            else:
+                still_pending.append(instance_id)
+                errors.setdefault(instance_id, "live descriptor 恢复失败")
+            continue
         if (
-            instance_id in live_instances
-            or location in live_locations
+            location in live_locations
             or team_sessions.references_instance(instance_id)
         ):
             still_pending.append(instance_id)
@@ -10544,8 +10620,8 @@ def _retry_pending_agent_retirements() -> dict[str, Any]:
             still_pending.append(instance_id)
             errors.setdefault(instance_id, "孤儿墓碑保存失败")
     return {
-        "requested": requested, "retired": retired, "orphaned": orphaned,
-        "pending": still_pending, "errors": errors,
+        "requested": requested, "restored": restored, "retired": retired,
+        "orphaned": orphaned, "pending": still_pending, "errors": errors,
         "complete": not still_pending,
     }
 

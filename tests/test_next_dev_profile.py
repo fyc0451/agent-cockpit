@@ -244,6 +244,22 @@ def test_dev_values_honors_project_root_env(
     assert values["COCKPIT_PROJECT_ROOT"] == str(projects)
 
 
+def test_dev_values_freezes_checkout_sha_for_runtime_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    repo = home / "agent-cockpit"
+    home.mkdir()
+    repo.mkdir()
+    monkeypatch.delenv("COCKPIT_PROJECT_ROOT", raising=False)
+    launcher = _dev_server()
+    monkeypatch.setattr(launcher, "_source_sha", lambda _repo: "a" * 40)
+
+    values = launcher.dev_values(repo, home)
+
+    assert values["COCKPIT_SOURCE_SHA"] == "a" * 40
+
+
 def test_dev_profile_rejects_sandbox_home_and_wrong_port(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

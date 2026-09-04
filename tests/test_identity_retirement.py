@@ -120,7 +120,7 @@ def test_retry_marks_unreferenced_missing_registry_identity_orphaned(
     result = server._retry_pending_agent_retirements()
 
     assert result == {
-        "requested": [INSTANCE_ID], "retired": [],
+        "requested": [INSTANCE_ID], "restored": [], "retired": [],
         "orphaned": [INSTANCE_ID], "pending": [], "errors": {},
         "complete": True,
     }
@@ -132,14 +132,44 @@ def test_retry_marks_unreferenced_missing_registry_identity_orphaned(
     assert server.herdr_client.pending_launch_descriptor_retirements() == []
 
 
-@pytest.mark.parametrize("reference", ["live_instance", "live_location", "binding"])
+def test_retry_restores_exact_live_instance_instead_of_warning_forever(
+    monkeypatch, tmp_path,
+):
+    project = _pending_descriptor(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_registry_scan", lambda: [])
+    monkeypatch.setattr(
+        server.herdr_client, "snapshot",
+        lambda: {
+            "available": True,
+            "sessions": [{
+                "session": "live-demo",
+                "agents": [{"name": INSTANCE_ID, "pane_id": "w1:p9"}],
+            }],
+        },
+    )
+    monkeypatch.setattr(server.team_sessions, "references_instance", lambda _id: False)
+
+    result = server._retry_pending_agent_retirements()
+
+    assert result["restored"] == [INSTANCE_ID]
+    assert result["pending"] == []
+    assert result["errors"] == {}
+    descriptor = server.herdr_client.get_launch_descriptor_by_instance(
+        INSTANCE_ID, include_retired=True,
+    )
+    assert descriptor["state"] == "active"
+    assert descriptor["session"] == "live-demo"
+    assert descriptor["pane_id"] == "w1:p9"
+    assert descriptor["workdir"] == str(project)
+    assert descriptor.get("retirement_pending_at") is None
+
+
+@pytest.mark.parametrize("reference", ["live_location", "binding"])
 def test_retry_keeps_still_referenced_identity_pending(
     monkeypatch, tmp_path, reference,
 ):
     _pending_descriptor(monkeypatch, tmp_path)
     agent = {"name": "other", "pane_id": "other"}
-    if reference == "live_instance":
-        agent["name"] = INSTANCE_ID
     if reference == "live_location":
         agent["pane_id"] = "w1:p2"
     monkeypatch.setattr(server, "_registry_scan", lambda: [])

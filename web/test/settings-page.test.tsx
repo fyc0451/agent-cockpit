@@ -3,7 +3,12 @@ import userEvent from '@testing-library/user-event'
 import { renderApp, stubDefaultFetch, stubFetch } from './helpers'
 
 const versionPayload = {
-  current: { version: '0.3.6' },
+  current: {
+    version: '0.3.6',
+    source_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    checkout_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    restart_required: false,
+  },
   latest: { version: '0.3.7', name: '0.3.7', url: 'https://github.com/fyc0451/agent-cockpit/releases/tag/agent-cockpit-v0.3.7' },
   status: 'update_available',
   checked_at: '2026-08-20T00:00:00Z',
@@ -64,8 +69,28 @@ describe('设置挂在 3.0 外壳', () => {
     renderApp('/settings?view=upgrade')
     expect(await screen.findByRole('tab', { name: '升级' })).toHaveAttribute('aria-selected', 'true')
     expect(await screen.findByText(/当前 0.3.6/)).toBeInTheDocument()
+    expect(screen.getByText(/运行代码 aaaaaaaaaaaa · 当前工作区 aaaaaaaaaaaa/)).toBeInTheDocument()
     expect(screen.getByText(/发现 0.3.7/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '一键升级' })).not.toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('运行进程和工作区代码不一致时明确要求重启', async () => {
+    stubDefaultFetch({
+      '/api/version': {
+        ...versionPayload,
+        current: {
+          version: '0.3.6',
+          source_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          checkout_sha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          restart_required: true,
+        },
+      },
+      '/api/upgrade/status': upgradeIdle,
+    })
+
+    renderApp('/settings?view=upgrade')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('8790 仍运行旧代码')
   })
 
   it('未配置团队时，原有设置页行为不变且团队只提供配置入口', async () => {

@@ -88,6 +88,30 @@ export function formatTeamTimestamp(value: string, now = new Date()): string {
     : `${twoDigits(parsed.getMonth() + 1)}-${twoDigits(parsed.getDate())} ${time}`
 }
 
+export function formatTeamDuration(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return ''
+  const seconds = Math.floor(milliseconds / 1000)
+  if (seconds < 1) return '不到 1 秒'
+  const days = Math.floor(seconds / 86_400)
+  const hours = Math.floor((seconds % 86_400) / 3_600)
+  const minutes = Math.floor((seconds % 3_600) / 60)
+  const remainder = seconds % 60
+  return [
+    days > 0 ? `${days} 天` : '',
+    hours > 0 ? `${hours} 小时` : '',
+    minutes > 0 ? `${minutes} 分` : '',
+    remainder > 0 ? `${remainder} 秒` : '',
+  ].filter(Boolean).join(' ')
+}
+
+function replyLatency(question: TeamMessage, reply: TeamMessage): number | null {
+  const askedAt = parseTeamTimestamp(question.created_ts)
+  const repliedAt = parseTeamTimestamp(reply.created_ts)
+  if (!askedAt || !repliedAt) return null
+  const milliseconds = repliedAt.getTime() - askedAt.getTime()
+  return milliseconds >= 0 ? milliseconds : null
+}
+
 function fullTeamTimestamp(value: string): string {
   const parsed = parseTeamTimestamp(value)
   if (!parsed) return '时间未知'
@@ -664,6 +688,7 @@ export function TeamTimeline({
           {rows.map((row) => {
             const request = replyRequests.get(row.id)
             const question = replyQuestions.get(row.id)
+            const latency = question ? replyLatency(question, row) : null
             const progress = activeProgress.get(row.id)
             const progressRows = progressHistory[row.id] ?? []
             const showCompletedProgress = repliedQuestionIds.has(row.id) && progressRows.length > 0
@@ -714,6 +739,16 @@ export function TeamTimeline({
                     📎 {attachment.filename} · {attachmentSize(attachment.size)}
                   </a>
                 ))}
+              </div>
+            )}
+            {question && latency !== null && (
+              <div className="gc-team-reply-evidence" aria-label="回复耗时">
+                <span title={[
+                  `提问 ${fullTeamTimestamp(question.created_ts)}`,
+                  `回复 ${fullTeamTimestamp(row.created_ts)}`,
+                ].join(' · ')}>
+                  回复耗时 {formatTeamDuration(latency)}
+                </span>
               </div>
             )}
             {row.replyEvidence && (

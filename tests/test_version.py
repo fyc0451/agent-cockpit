@@ -326,12 +326,23 @@ def test_api_version_ok_and_unavailable_degrade(monkeypatch, tmp_path):
         version, "_http_get_latest",
         lambda: version._parse_release_payload(_release("v0.4.0")),
     )
+    monkeypatch.setattr(
+        server.release_identity,
+        "get_release_identity",
+        lambda: {"source_sha": "a" * 40},
+    )
+    monkeypatch.setattr(server, "_source_checkout_sha", lambda: "b" * 40)
     client = TestClient(server.app)
     headers = {"authorization": "Bearer secret"}
     response = client.get("/api/version", headers=headers)
     assert response.status_code == 200
     body = response.json()
-    assert body["current"] == {"version": "0.2.0"}
+    assert body["current"] == {
+        "version": "0.2.0",
+        "source_sha": "a" * 40,
+        "checkout_sha": "b" * 40,
+        "restart_required": True,
+    }
     assert body["status"] == "update_available"
     assert body["latest"]["version"] == "0.4.0"
     assert body["latest"]["url"].startswith(

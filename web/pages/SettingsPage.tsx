@@ -214,6 +214,19 @@ function UpgradeTab() {
             当前 {version?.current ?? '…'}
             {version?.latest ? ` · 远程 ${version.latest}` : ''}
           </p>
+          {version?.runtimeSourceSha ? (
+            <p className="list-sub">
+              运行代码 {version.runtimeSourceSha.slice(0, 12)}
+              {version.checkoutSourceSha
+                ? ` · 当前工作区 ${version.checkoutSourceSha.slice(0, 12)}`
+                : ''}
+            </p>
+          ) : null}
+          {version?.restartRequired ? (
+            <p className="list-sub" role="alert">
+              当前页面工作区已更新，但 8790 仍运行旧代码；请安全重启服务后再验收。
+            </p>
+          ) : null}
           <p className="list-sub">{upgradeCopy(version, status)}</p>
           {startError ? <p className="list-sub">{startError}</p> : null}
           <div className="theme-options">

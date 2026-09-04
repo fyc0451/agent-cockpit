@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as teamLedger from '../api/teamLedger'
 import {
+  formatTeamDuration,
   formatTeamTimestamp,
   mergeTeamProgressHistory,
   TeamTimeline,
@@ -42,6 +43,14 @@ function message(
 describe('TeamTimeline', () => {
   beforeEach(() => vi.unstubAllGlobals())
   afterEach(() => vi.useRealTimers())
+
+  it('把回复耗时格式化到秒、小时和天', () => {
+    expect(formatTeamDuration(999)).toBe('不到 1 秒')
+    expect(formatTeamDuration(90_000)).toBe('1 分 30 秒')
+    expect(formatTeamDuration(3_661_000)).toBe('1 小时 1 分 1 秒')
+    expect(formatTeamDuration(90_061_000)).toBe('1 天 1 小时 1 分 1 秒')
+    expect(formatTeamDuration(-1)).toBe('')
+  })
 
   it('进度历史只保留当前消息且每条最多十项', () => {
     const progressRows: TeamProgress[] = Array.from({ length: 12 }, (_, index) => ({
@@ -527,7 +536,12 @@ describe('TeamTimeline', () => {
       json: async () => ({
         messages: [
           message(50, question, '数据库连接失败'),
-          message(51, '已确认收到。稍后给出排查步骤。', 'Re: 数据库连接失败'),
+          message(
+            51,
+            '已确认收到。稍后给出排查步骤。',
+            'Re: 数据库连接失败',
+            '2026-08-22 12:01:30',
+          ),
         ],
       }),
     } as Response)))
@@ -546,6 +560,11 @@ describe('TeamTimeline', () => {
     expect(screen.getAllByText(question)).toHaveLength(2)
     expect(screen.getByText('回复详情')).toBeInTheDocument()
     expect(screen.getByText('已确认收到。稍后给出排查步骤。')).toBeInTheDocument()
+    const latency = screen.getByLabelText('回复耗时')
+    expect(latency).toHaveTextContent('回复耗时 1 分 30 秒')
+    expect(within(latency).getByText('回复耗时 1 分 30 秒')).toHaveAttribute(
+      'title', expect.stringContaining('提问'),
+    )
   })
 
   it('回复展示固定的项目上下文与开发 Agent 咨询证据', async () => {
@@ -638,6 +657,51 @@ describe('TeamTimeline', () => {
     expect(await screen.findByText('最早消息')).toBeInTheDocument()
     expect(screen.getAllByTestId('team-msg-3')).toHaveLength(1)
     expect(screen.queryByRole('button', { name: '加载更早消息' })).not.toBeInTheDocument()
+  })
+
+  it('加载更早的原问题后补算历史回复耗时', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/team/projects/proj-a/chat/messages') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            messages: [message(
+              82,
+              '历史回复正文',
+              'Re: 跨页问题',
+              '2026-08-22 14:05:06',
+            )],
+            has_more: true,
+            next_before_id: 82,
+          }),
+        } as Response
+      }
+      if (url === '/api/team/projects/proj-a/chat/messages?limit=80&before_id=82') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            messages: [message(81, '历史问题正文', '跨页问题', '2026-08-22 12:00:00')],
+            has_more: false,
+            next_before_id: null,
+          }),
+        } as Response
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
+
+    expect(await screen.findByText('历史回复正文')).toBeInTheDocument()
+    expect(screen.queryByLabelText('回复耗时')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '加载更早消息' }))
+    expect(await screen.findByLabelText('回复耗时')).toHaveTextContent(
+      '回复耗时 2 小时 5 分 6 秒',
+    )
   })
 
   it('由 Human 在消息下明确填写范围后才交给同项目普通会话', async () => {

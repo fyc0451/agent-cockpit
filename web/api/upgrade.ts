@@ -12,6 +12,9 @@ function asString(v: unknown): string | null {
 
 export interface VersionInfo {
   current: string
+  runtimeSourceSha: string | null
+  checkoutSourceSha: string | null
+  restartRequired: boolean
   latest: string | null
   status: 'up_to_date' | 'update_available' | 'unavailable'
   latestUrl: string | null
@@ -66,6 +69,8 @@ export async function fetchVersionInfo(refresh = false): Promise<VersionInfo> {
     throw new ApiError({ code: 'protocol_error', message: '版本响应无效', retryable: false })
   }
   const current = isObj(raw.current) ? asString(raw.current.version) : null
+  const runtimeSourceSha = isObj(raw.current) ? asString(raw.current.source_sha) : null
+  const checkoutSourceSha = isObj(raw.current) ? asString(raw.current.checkout_sha) : null
   const latest = isObj(raw.latest) ? asString(raw.latest.version) : null
   const status =
     raw.status === 'update_available' || raw.status === 'up_to_date' || raw.status === 'unavailable'
@@ -73,6 +78,9 @@ export async function fetchVersionInfo(refresh = false): Promise<VersionInfo> {
       : 'unavailable'
   return {
     current: current ?? '未知',
+    runtimeSourceSha,
+    checkoutSourceSha,
+    restartRequired: isObj(raw.current) && raw.current.restart_required === true,
     latest,
     status,
     latestUrl: isObj(raw.latest) ? asString(raw.latest.url) : null,

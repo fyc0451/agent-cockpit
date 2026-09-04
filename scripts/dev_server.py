@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,6 +17,21 @@ sys.path.insert(0, str(ROOT))
 
 from agent_cockpit import next_profile
 from agent_cockpit.instance_lock import LOCK_FD_ENV, InstanceLock, LockError
+
+
+_SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _source_sha(repo: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = result.stdout.strip().lower() if result.returncode == 0 else ""
+    return value if _SHA40_RE.fullmatch(value) else None
 
 
 def _load_next_dev():
@@ -41,6 +58,9 @@ def dev_values(repo: Path, home: Path, host: str = "127.0.0.1") -> dict[str, str
         "COCKPIT_HOST": host,
     }
     values.update(next_profile.dev_layout(home, repo))
+    source_sha = _source_sha(repo)
+    if source_sha is not None:
+        values["COCKPIT_SOURCE_SHA"] = source_sha
     return values
 
 

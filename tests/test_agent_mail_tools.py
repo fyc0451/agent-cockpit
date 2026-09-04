@@ -2,6 +2,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 import urllib.error
@@ -44,6 +45,27 @@ def _load_tool(name, module_name):
 
 def _load_am_common():
     return _load_tool("am_common.py", "cockpit_am_common")
+
+
+def test_common_paths_honor_isolated_agent_mail_environment(tmp_path):
+    client_env = tmp_path / "client.env"
+    registry = tmp_path / "registry"
+    env = {
+        **os.environ,
+        "AGENT_MAIL_CLIENT_ENV": str(client_env),
+        "AGENT_MAIL_REGISTRY_DIR": str(registry),
+        "PYTHONPATH": str(ROOT),
+    }
+    result = subprocess.run(
+        [
+            sys.executable, "-c",
+            "from agent_mail_commands import common; "
+            "print(common.CLIENT_ENV); print(common.REGISTRY_DIR)",
+        ],
+        cwd=ROOT, env=env, capture_output=True, text=True, check=True,
+    )
+
+    assert result.stdout.splitlines() == [str(client_env), str(registry)]
 
 
 def test_bound_session_routes_to_unique_pane_even_when_cwd_differs():

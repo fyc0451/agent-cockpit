@@ -15,8 +15,17 @@ from agent_cockpit.artifact_root import resolve_artifact_root
 from agent_cockpit import next_profile
 
 
-CLIENT_ENV = Path.home() / ".agent-mail" / "client.env"
-REGISTRY_DIR = Path.home() / ".agent-mail" / "registry"
+def _configured_path(env_name: str, fallback: Path) -> Path:
+    configured = os.environ.get(env_name, "").strip()
+    return Path(configured).expanduser() if configured else fallback
+
+
+CLIENT_ENV = _configured_path(
+    "AGENT_MAIL_CLIENT_ENV", Path.home() / ".agent-mail" / "client.env",
+)
+REGISTRY_DIR = _configured_path(
+    "AGENT_MAIL_REGISTRY_DIR", Path.home() / ".agent-mail" / "registry",
+)
 
 
 def helper_command(name: str) -> str:
