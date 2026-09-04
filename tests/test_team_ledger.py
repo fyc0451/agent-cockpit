@@ -279,6 +279,7 @@ def test_hub_chat_history_adds_local_reply_evidence_without_changing_hub_row(
                 "dirty": False,
                 "handoff_updated": "2026-08-25",
                 "consulted": True,
+                "answer_source": "local_lead",
                 "created_ts": 1.0,
             },
         } if (hub, slug) == (HUB, "demo") else {},

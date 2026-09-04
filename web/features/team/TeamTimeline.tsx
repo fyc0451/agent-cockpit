@@ -103,6 +103,14 @@ function progressPhaseText(phase: TeamProgress['phase']): string {
   return '正在处理'
 }
 
+function replySourceText(
+  source: NonNullable<TeamMessage['replyEvidence']>['answerSource'],
+): string {
+  if (source === 'local_lead') return '答复来源：本地开发 Agent'
+  if (source === 'context_pack') return '答复来源：Context Pack'
+  return '答复来源：Team Agent'
+}
+
 function progressElapsed(startedAt: string): string {
   const started = parseTeamTimestamp(startedAt)
   if (!started) return ''
@@ -716,11 +724,9 @@ export function TeamTimeline({
                     ? `handoff ${row.replyEvidence.handoffUpdated}`
                     : null,
                 ].filter(Boolean).join(' · ')}>
-                  {row.replyEvidence.contextAvailable
-                    ? '基于项目上下文'
-                    : '项目上下文不可用'}
+                  {replySourceText(row.replyEvidence.answerSource)}
                 </span>
-                {row.replyEvidence.consulted && <span>已咨询本地开发 Agent</span>}
+                {row.replyEvidence.contextAvailable && <span>已冻结项目上下文</span>}
               </div>
             )}
             {request && (

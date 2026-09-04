@@ -25,6 +25,7 @@ export interface TeamMessage {
     dirty: boolean | null
     handoffUpdated: string | null
     consulted: boolean
+    answerSource: 'team_agent' | 'context_pack' | 'local_lead'
     createdTs: number
   } | null
 }
@@ -48,6 +49,7 @@ function parseReplyEvidence(raw: unknown): TeamMessage['replyEvidence'] {
   if (
     typeof raw.context_available !== 'boolean'
     || typeof raw.consulted !== 'boolean'
+    || !['team_agent', 'context_pack', 'local_lead'].includes(String(raw.answer_source))
     || typeof raw.created_ts !== 'number'
     || !Number.isFinite(raw.created_ts)
   ) return null
@@ -72,6 +74,7 @@ function parseReplyEvidence(raw: unknown): TeamMessage['replyEvidence'] {
     dirty,
     handoffUpdated,
     consulted: raw.consulted,
+    answerSource: raw.answer_source as 'team_agent' | 'context_pack' | 'local_lead',
     createdTs: raw.created_ts,
   }
 }

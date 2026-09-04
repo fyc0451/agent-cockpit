@@ -62,6 +62,12 @@ def _claim(mode="confirm", *, expires=None):
     }
 
 
+def _route(work_id, route="team_agent", reason="social_message"):
+    return team_lead_worker.attach_routing(
+        work_id, _binding(), {"route": route, "reason": reason},
+    )
+
+
 def test_claim_persists_0600_but_prompt_contains_no_remote_content(_state):
     prompts = []
     result = team_lead_worker.poll_binding(
@@ -167,6 +173,7 @@ def test_confirm_replies_only_after_hub_authorized_claim_then_completes():
         "importance": "normal",
         "mention_handles": ["alice"],
     }
+    _route(result["work_id"])
 
     outcome = team_lead_worker.respond(
         result["work_id"], _binding(), response,
@@ -199,6 +206,7 @@ def test_auto_replay_uses_stable_key_and_completes_once_after_retry():
         "importance": "normal",
         "mention_handles": ["alice"],
     }
+    _route(result["work_id"])
 
     def direct(slug, payload):
         direct_calls.append((slug, payload))
@@ -280,7 +288,7 @@ def test_startup_discards_retired_queue_state(_state, version):
     team_lead_worker.reset_notifications()
 
     assert json.loads(_state.read_text()) == {
-        "version": 7, "work_items": [], "consult_requests": [],
+        "version": 8, "work_items": [], "consult_requests": [],
         "reply_evidence": [],
     }
     assert stat.S_IMODE(_state.stat().st_mode) == 0o600
@@ -296,9 +304,69 @@ def test_startup_migrates_v5_without_dropping_pending_work(_state):
     team_lead_worker.reset_notifications()
 
     migrated = json.loads(_state.read_text())
-    assert migrated["version"] == 7
+    assert migrated["version"] == 8
     assert migrated["reply_evidence"] == []
     assert migrated["work_items"][0]["work_id"] == work_id
+
+
+def test_startup_migrates_v7_without_claiming_a_deterministic_answer_source(_state):
+    work_id = _claimed_work()
+    team_lead_worker.create_consult(
+        work_id,
+        _binding(),
+        _consult_target(),
+        kind="evidence",
+        question="旧版自主选择的问题",
+        now=100.0,
+    )
+    legacy = json.loads(_state.read_text())
+    legacy["version"] = 7
+    legacy["work_items"][0]["message"].pop("attachments")
+    legacy["reply_evidence"] = [{
+        "hub": "https://team.example",
+        "project_slug": "core",
+        "message_id": 77,
+        "work_id": "a" * 32,
+        "context_available": True,
+        "context_fingerprint": "f" * 64,
+        "sha": "b" * 40,
+        "dirty": False,
+        "handoff_updated": "2026-08-25",
+        "consulted": True,
+        "created_ts": 1.0,
+    }]
+    _state.write_text(json.dumps(legacy))
+
+    team_lead_worker.reset_notifications()
+
+    migrated = json.loads(_state.read_text())
+    assert migrated["version"] == 8
+    assert migrated["work_items"][0]["message"]["attachments"] == []
+    assert migrated["consult_requests"] == []
+    assert migrated["reply_evidence"][0]["answer_source"] == "team_agent"
+
+
+def test_startup_migrates_v7_responding_work_for_exact_retry(_state):
+    work_id = _claimed_work()
+    legacy = json.loads(_state.read_text())
+    legacy["version"] = 7
+    legacy["work_items"][0]["state"] = "responding"
+    legacy["work_items"][0]["response"] = {
+        "subject": "Re",
+        "body_md": "旧版已冻结答案",
+        "importance": "normal",
+        "mention_handles": ["alice"],
+    }
+    _state.write_text(json.dumps(legacy))
+
+    team_lead_worker.reset_notifications()
+
+    migrated = json.loads(_state.read_text())
+    assert migrated["work_items"][0]["work_id"] == work_id
+    assert migrated["work_items"][0]["routing"] == {
+        "route": "team_agent",
+        "reason": "social_message",
+    }
 
 
 def test_progress_has_stable_sequence_and_suppresses_preexisting_pane_text():
@@ -392,8 +460,13 @@ def test_reply_evidence_freezes_first_context_and_records_consult_once():
     team_lead_worker.respond_consult(
         consult["request_id"], "/work/demo", "dev-main", "已通过", now=101.0,
     )
+    _route(
+        work_id,
+        route="local_lead",
+        reason="project_detail_requires_local_context",
+    )
     response = {
-        "subject": "Re: Remote subject", "body_md": "已处理",
+        "subject": "Re: Remote subject", "body_md": "已通过",
         "importance": "normal", "mention_handles": ["alice"],
     }
     complete_calls = []
@@ -420,6 +493,7 @@ def test_reply_evidence_freezes_first_context_and_records_consult_once():
         "dirty": True,
         "handoff_updated": "2026-08-25",
         "consulted": True,
+        "answer_source": "local_lead",
         "created_ts": evidence[77]["created_ts"],
     })
     team_lead_worker.respond(
@@ -434,6 +508,7 @@ def test_reply_evidence_freezes_first_context_and_records_consult_once():
 
 def test_reply_without_valid_message_id_fails_closed_before_complete():
     work_id = _claimed_work()
+    _route(work_id)
     response = {
         "subject": "Re: Remote subject", "body_md": "已处理",
         "importance": "normal", "mention_handles": ["alice"],
@@ -452,6 +527,126 @@ def test_reply_without_valid_message_id_fails_closed_before_complete():
     assert team_lead_worker.reply_evidence_for_binding(
         "https://team.example", "core",
     ) == {}
+
+
+def test_reply_without_system_route_fails_before_hub_calls():
+    work_id = _claimed_work()
+    calls = []
+
+    with pytest.raises(ValueError, match="尚未完成系统路由"):
+        team_lead_worker.respond(
+            work_id,
+            _binding(),
+            {
+                "subject": "Re", "body_md": "任意回答",
+                "importance": "normal", "mention_handles": ["alice"],
+            },
+            direct_reply=lambda *_args: calls.append("reply"),
+            complete=lambda *_args: calls.append("complete"),
+        )
+
+    assert calls == []
+
+
+def test_local_lead_route_requires_exact_consult_answer_before_hub_calls():
+    work_id = _claimed_work()
+    _route(
+        work_id,
+        route="local_lead",
+        reason="project_detail_requires_local_context",
+    )
+    consult = team_lead_worker.create_consult(
+        work_id, _binding(), _consult_target(),
+        kind="evidence", question="项目状态？", now=100.0,
+    )
+    team_lead_worker.respond_consult(
+        consult["request_id"], "/work/demo", "dev-main", "本地证据答案", now=101.0,
+    )
+    calls = []
+
+    with pytest.raises(ValueError, match="必须原样使用"):
+        team_lead_worker.respond(
+            work_id,
+            _binding(),
+            {
+                "subject": "Re", "body_md": "Team Agent 自己改写的答案",
+                "importance": "normal", "mention_handles": ["alice"],
+            },
+            direct_reply=lambda *_args: calls.append("reply"),
+            complete=lambda *_args: calls.append("complete"),
+        )
+
+    assert calls == []
+
+
+def test_local_lead_route_rejects_consult_from_another_binding(_state):
+    work_id = _claimed_work()
+    _route(
+        work_id,
+        route="local_lead",
+        reason="project_detail_requires_local_context",
+    )
+    consult = team_lead_worker.create_consult(
+        work_id, _binding(), _consult_target(),
+        kind="evidence", question="Project status?", now=100.0,
+    )
+    team_lead_worker.respond_consult(
+        consult["request_id"], "/work/demo", "dev-main", "local answer", now=101.0,
+    )
+    data = json.loads(_state.read_text())
+    data["consult_requests"][0]["source_client_session_id"] = "foreign-client"
+    _state.write_text(json.dumps(data))
+    calls = []
+
+    with pytest.raises(ValueError, match="Lead"):
+        team_lead_worker.respond(
+            work_id,
+            _binding(),
+            {
+                "subject": "Re", "body_md": "local answer",
+                "importance": "normal", "mention_handles": ["alice"],
+            },
+            direct_reply=lambda *_args: calls.append("reply"),
+            complete=lambda *_args: calls.append("complete"),
+        )
+
+    assert calls == []
+
+
+def test_context_pack_route_requires_its_deterministic_answer():
+    work_id = _claimed_work()
+    pack = {
+        "version": 1,
+        "project": {"key": "demo"},
+        "git": {
+            "available": True,
+            "head": "a" * 40,
+            "dirty": False,
+            "changes": {
+                "staged": 0, "unstaged": 0, "conflicted": 0, "untracked": 0,
+            },
+        },
+        "handoff": {"available": False},
+        "development_lead": {"configured": False, "available": False},
+        "fingerprint": "f" * 64,
+    }
+    team_lead_worker.attach_context_pack(work_id, _binding(), pack)
+    _route(work_id, route="context_pack", reason="git_snapshot")
+    calls = []
+
+    with pytest.raises(ValueError, match="必须原样使用"):
+        team_lead_worker.respond(
+            work_id,
+            _binding(),
+            {
+                "subject": "Re", "body_md": "我猜是另一个 SHA",
+                "importance": "normal", "mention_handles": ["alice"],
+            },
+            direct_reply=lambda *_args: calls.append("reply"),
+            complete=lambda *_args: calls.append("complete"),
+        )
+
+    assert calls == []
 
 
 def test_consult_create_and_response_are_exactly_once():

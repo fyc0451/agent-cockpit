@@ -343,7 +343,7 @@ export function DetailsPanel({
                   )}
                   {teamBinding?.managedRuntime && onTeamSetConsultTarget && (
                     <>
-                      <label htmlFor="team-consult-target">缺少项目上下文时询问</label>
+                      <label htmlFor="team-consult-target">项目问题交给</label>
                       <select
                         id="team-consult-target"
                         aria-label="Topic Agent 咨询目标"
@@ -351,11 +351,14 @@ export function DetailsPanel({
                         onChange={(event) => setTeamConsultSession(event.target.value)}
                         disabled={teamAgentLoading}
                       >
-                        <option value="">不启用咨询</option>
+                        <option value="">未配置（项目问题将阻断）</option>
                         {teamConsultTargets.map((target) => (
                           <option key={target.session} value={target.session}>{target.label}</option>
                         ))}
                       </select>
+                      <span className="gc-member-sub">
+                        代码、报错、设计、测试、部署和上下文不明的问题会交给所选的同项目普通开发 Lead；Topic Agent 不会自行猜测。
+                      </span>
                       {teamBinding.consultTarget && !teamBinding.consultTarget.ready && (
                         <div className="gc-modal-error">
                           {teamBinding.consultTarget.reason || '咨询目标不可用，需要重新选择'}

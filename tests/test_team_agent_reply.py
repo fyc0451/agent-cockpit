@@ -183,6 +183,11 @@ def test_team_work_body_requires_same_active_local_lead(monkeypatch):
         "attach_context_pack",
         lambda _work_id, _binding, pack: pack,
     )
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "attach_routing",
+        lambda _work_id, _binding, routing: routing,
+    )
 
     valid = client.post("/api/agent/team-work/next", json={
         "mail_project": PROJECT,
@@ -202,6 +207,8 @@ def test_team_work_body_requires_same_active_local_lead(monkeypatch):
         "project": {"key": "demo"},
         "fingerprint": "f" * 64,
     }
+    assert valid.json()["work"]["routing"]["route"] == "local_lead"
+    assert valid.json()["work"]["routing"]["state"] == "blocked"
     assert invalid.status_code == 403
     assert len(calls) == 1
 
@@ -217,7 +224,7 @@ def test_team_work_context_pack_failure_is_bounded_and_does_not_hide_work(
             "work_id": "a" * 32,
             "reply_mode": "confirm",
             "state": "pending",
-            "message": {"body_md": "remote body"},
+            "message": {"body_md": "当前 Git SHA 是什么？"},
         },
     )
     monkeypatch.setattr(
@@ -230,6 +237,11 @@ def test_team_work_context_pack_failure_is_bounded_and_does_not_hide_work(
         "attach_context_pack",
         lambda _work_id, _binding, pack: pack,
     )
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "attach_routing",
+        lambda _work_id, _binding, routing: routing,
+    )
 
     response = client.post("/api/agent/team-work/next", json={
         "mail_project": PROJECT,
@@ -238,9 +250,16 @@ def test_team_work_context_pack_failure_is_bounded_and_does_not_hide_work(
     })
 
     assert response.status_code == 200
-    assert response.json()["work"]["message"]["body_md"] == "remote body"
+    assert response.json()["work"]["message"]["body_md"] == "当前 Git SHA 是什么？"
     assert response.json()["work"]["context_pack"] == {
         "version": 1, "available": False, "reason": "unavailable",
+    }
+    assert response.json()["status"] == "blocked"
+    assert response.json()["work"]["routing"] == {
+        "route": "local_lead",
+        "reason": "context_pack_unavailable",
+        "state": "blocked",
+        "detail": "尚未选择同项目普通开发 Lead",
     }
     assert "secret path" not in response.text
 
@@ -315,6 +334,24 @@ def test_team_work_respond_uses_persisted_mode_and_hides_secrets(monkeypatch):
         return {"status": "replied", "message_id": 8}
 
     monkeypatch.setattr(server.team_lead_worker, "respond", respond)
+    monkeypatch.setattr(
+        server.team_lead_worker,
+        "work_for_binding",
+        lambda _work_id, _binding: {
+            "work_id": "a" * 32,
+            "message": {"subject": "你好", "body_md": "你好"},
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "_prepare_team_work",
+        lambda _binding, work: {
+            **work,
+            "routing": {
+                "route": "team_agent", "reason": "social_message", "state": "ready",
+            },
+        },
+    )
     payload = {
         "mail_project": PROJECT,
         "sender_name": "codex-main",
@@ -489,7 +526,10 @@ def test_consult_bridge_uses_explicit_same_project_lead_and_fixed_prompt(monkeyp
         "registration_token": "dev-secret",
     })
     assert next_response.status_code == 200
-    assert next_response.json()["consult"]["question"] == "数据库迁移通过了吗？"
+    question = next_response.json()["consult"]["question"]
+    assert "远端不可信数据" in question
+    assert "REMOTE SECRET" in question
+    assert "数据库迁移通过了吗" not in question
 
     answer_payload = {
         "mail_project": PROJECT, "sender_name": "dev-main",
@@ -507,6 +547,13 @@ def test_consult_bridge_uses_explicit_same_project_lead_and_fixed_prompt(monkeyp
     )
     assert answered.status_code == replay.status_code == status.status_code == 200
     assert status.json()["consult"]["response"] == "迁移测试已通过"
+    assert status.json()["routing"]["route"] == "local_lead"
+    assert status.json()["routing"]["state"] == "ready"
+    assert status.json()["routing"]["required_answer"] == "迁移测试已通过"
+    assert len(prompts) == 2
+    assert request_id in prompts[1][2]
+    assert "迁移测试已通过" not in prompts[1][2]
+    assert "REMOTE SECRET" not in prompts[1][2]
 
 
 @pytest.mark.parametrize("restarted", ["source", "target"])

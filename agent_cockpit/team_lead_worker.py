@@ -17,9 +17,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from . import runtime_paths
+from . import team_message_routing
 
 STATE_PATH = runtime_paths.store("inbox_route")
-STATE_VERSION = 7
+STATE_VERSION = 8
 CONSULT_TTL_SECONDS = 10 * 60
 REPLY_EVIDENCE_LIMIT = 1_000
 _lock = threading.RLock()
@@ -53,16 +54,49 @@ def _load() -> dict[str, Any]:
         return _empty()
     if (
         isinstance(data, dict)
-        and data.get("version") in {4, 5, 6}
+        and data.get("version") in {4, 5, 6, 7}
         and isinstance(data.get("work_items"), list)
     ):
+        migrated_work = []
+        for item in data["work_items"]:
+            if not isinstance(item, dict):
+                migrated_work.append(item)
+                continue
+            migrated = dict(item)
+            message = migrated.get("message")
+            if isinstance(message, dict) and "attachments" not in message:
+                migrated["message"] = {**message, "attachments": []}
+            if (
+                migrated.get("state") == "responding"
+                and isinstance(migrated.get("response"), dict)
+                and "routing" not in migrated
+            ):
+                # 旧 worker 已在 v8 路由出现前冻结回复。保留幂等完成路径，
+                # 但不声称它来自新的确定性答复源。
+                migrated["routing"] = {
+                    "route": "team_agent",
+                    "reason": "social_message",
+                }
+            migrated_work.append(migrated)
+        evidence = data.get("reply_evidence", []) if data.get("version") in {6, 7} else []
+        migrated_evidence = []
+        for item in evidence:
+            if not isinstance(item, dict):
+                migrated_evidence.append(item)
+                continue
+            migrated = dict(item)
+            if "answer_source" not in migrated:
+                # v7 及更早版本未强制原样使用来源答案；即使有上下文或咨询，
+                # 最终正文仍由 Team Agent 决定。
+                migrated["answer_source"] = "team_agent"
+            migrated_evidence.append(migrated)
         return {
             "version": STATE_VERSION,
-            "work_items": data["work_items"],
-            "consult_requests": (
-                data.get("consult_requests", []) if data.get("version") in {5, 6} else []
-            ),
-            "reply_evidence": data.get("reply_evidence", []) if data.get("version") == 6 else [],
+            "work_items": migrated_work,
+            # 旧咨询由 Team Agent 自选。v8 待处理工作必须重新走系统白名单，
+            # 不能静默继承 Agent 选择的问题或目标。
+            "consult_requests": [],
+            "reply_evidence": migrated_evidence,
         }
     if (
         not isinstance(data, dict)
@@ -198,9 +232,9 @@ def _validated_claim(
         "message": {
             key: message.get(key) for key in (
                 "message_id", "subject", "body_md", "importance",
-                "sender_name", "sender_handle", "created_ts", "attachments",
+                "sender_name", "sender_handle", "created_ts",
             )
-        },
+        } | {"attachments": attachments},
         "state": "pending",
         "notified": False,
         "created_ts": time.time(),
@@ -215,7 +249,7 @@ def reset_notifications() -> None:
             try:
                 legacy = json.loads(STATE_PATH.read_text(encoding="utf-8")).get(
                     "version"
-                ) in {2, 3, 4, 5, 6}
+                ) in {2, 3, 4, 5, 6, 7}
             except (OSError, UnicodeError, ValueError, AttributeError):
                 pass
         data = _load()
@@ -227,6 +261,9 @@ def reset_notifications() -> None:
         for item in data["consult_requests"]:
             if item.get("state") in {"pending", "claimed"} and item.get("notified"):
                 item["notified"] = False
+                changed = True
+            if item.get("state") == "responded" and item.get("answer_notified"):
+                item["answer_notified"] = False
                 changed = True
         if changed:
             _write(data)
@@ -293,6 +330,8 @@ def poll_binding(
                 claimed["response"] = current.get("response")
                 if isinstance(current.get("context_pack"), dict):
                     claimed["context_pack"] = current["context_pack"]
+                if isinstance(current.get("routing"), dict):
+                    claimed["routing"] = current["routing"]
                 for key in (
                     "progress_phase", "progress_summary", "progress_sequence",
                     "progress_baseline_summary",
@@ -328,7 +367,10 @@ def poll_binding(
             "若消息要求写操作，不得执行；但必须先完整给出证据分析、问题分类、"
             "修复顺序、验收步骤和阻塞点，再说明需由 Human 在 Team 页面点击"
             "“交给本地会话处理”明确授权。不得只回复收到或权限声明。"
-            "处理后调用对应 respond API。"
+            "读取结果中的 routing 是系统强制策略：team_agent 只处理窄范围社交消息；"
+            "context_pack 必须原样使用 required_answer；local_lead 必须等待系统已创建"
+            "的咨询并用 --consult-status 取回答复，随后原样提交。不得自行改路由、"
+            "自行发起额外咨询或改写系统选定来源的答案。处理后调用对应 respond API。"
         )
         sent = notify(str(binding["session"]), str(existing["pane_id"]), prompt)
         if sent:
@@ -362,6 +404,10 @@ def next_for_binding(binding: dict[str, Any]) -> dict[str, Any] | None:
         "state": item.get("state"),
         "inbox_item_id": item.get("inbox_item_id"),
         "started_at": item.get("created_ts"),
+        **(
+            {"routing": dict(item["routing"])}
+            if isinstance(item.get("routing"), dict) else {}
+        ),
     }
 
 
@@ -434,6 +480,34 @@ def attach_context_pack(
         return dict(context_pack)
 
 
+def attach_routing(
+    work_id: str, binding: dict[str, Any], routing: dict[str, str],
+) -> dict[str, str]:
+    """首次读取时冻结系统路由；Agent 不能覆盖或降级。"""
+    if not team_message_routing.valid_routing(routing):
+        raise ValueError("Team 消息路由无效")
+    route = routing["route"]
+    reason = routing["reason"]
+    normalized = {"route": route, "reason": reason}
+    with _lock:
+        data = _load()
+        item = next((
+            row for row in data["work_items"]
+            if row.get("work_id") == work_id and _binding_matches(row, binding)
+            and row.get("state") in {"pending", "responding"}
+        ), None)
+        if item is None:
+            raise KeyError("Team Lead 工作不存在")
+        saved = item.get("routing")
+        if isinstance(saved, dict):
+            if saved != normalized:
+                raise ValueError("Team 消息路由已冻结")
+            return dict(saved)
+        item["routing"] = normalized
+        _write(data)
+        return dict(normalized)
+
+
 def _reply_context_evidence(context_pack: Any) -> dict[str, Any]:
     pack = context_pack if isinstance(context_pack, dict) else {}
     git = pack.get("git") if isinstance(pack.get("git"), dict) else {}
@@ -471,7 +545,7 @@ def reply_evidence_for_binding(hub: str, project_slug: str) -> dict[int, dict[st
         int(row["message_id"]): {
             key: row.get(key) for key in (
                 "context_available", "context_fingerprint", "sha", "dirty",
-                "handoff_updated", "consulted", "created_ts",
+                "handoff_updated", "consulted", "answer_source", "created_ts",
             )
         }
         for row in rows
@@ -494,6 +568,14 @@ def work_for_binding(work_id: str, binding: dict[str, Any]) -> dict[str, Any] | 
         "reply_mode": item.get("reply_mode"),
         "message": dict(item.get("message") or {}),
         "state": item.get("state"),
+        **(
+            {"context_pack": dict(item["context_pack"])}
+            if isinstance(item.get("context_pack"), dict) else {}
+        ),
+        **(
+            {"routing": dict(item["routing"])}
+            if isinstance(item.get("routing"), dict) else {}
+        ),
     }
 
 
@@ -549,7 +631,7 @@ def create_consult(
     if kind not in {"status", "decision", "evidence", "blocker"}:
         raise ValueError("咨询类型无效")
     clean_question = question.strip()
-    if not clean_question or len(clean_question) > 2_000:
+    if not clean_question or len(clean_question) > team_message_routing.MAX_CONSULT_QUESTION:
         raise ValueError("咨询问题无效")
     current_time = time.time() if now is None else now
     with _lock:
@@ -597,6 +679,7 @@ def create_consult(
             "question": clean_question,
             "state": "pending",
             "notified": False,
+            "answer_notified": False,
             "created_ts": current_time,
             "expires_ts": current_time + CONSULT_TTL_SECONDS,
         }
@@ -706,6 +789,7 @@ def respond_consult(
             return _public_consult(item, current_time)
         item["response"] = clean
         item["state"] = "responded"
+        item["answer_notified"] = False
         _write(data)
         return _public_consult(item, current_time)
 
@@ -738,6 +822,29 @@ def mark_consult_notified(request_id: str) -> None:
             _write(data)
 
 
+def pending_consult_answer_notifications() -> list[dict[str, Any]]:
+    """返回已答复但尚未唤醒源 Team Agent 的固定 ID 快照。"""
+    with _lock:
+        return [
+            dict(row) for row in _load()["consult_requests"]
+            if row.get("state") == "responded"
+            and row.get("answer_notified") is not True
+        ]
+
+
+def mark_consult_answer_notified(request_id: str) -> None:
+    with _lock:
+        data = _load()
+        item = next((
+            row for row in data["consult_requests"]
+            if row.get("request_id") == request_id
+            and row.get("state") == "responded"
+        ), None)
+        if item is not None and item.get("answer_notified") is not True:
+            item["answer_notified"] = True
+            _write(data)
+
+
 def invalidate_consult(request_id: str, reason: str) -> None:
     if reason not in {
         "source_identity_changed", "target_missing", "target_ambiguous",
@@ -750,7 +857,7 @@ def invalidate_consult(request_id: str, reason: str) -> None:
             row for row in data["consult_requests"]
             if row.get("request_id") == request_id
         ), None)
-        if item is not None and item.get("state") in {"pending", "claimed"}:
+        if item is not None and item.get("state") in {"pending", "claimed", "responded"}:
             item["state"] = "invalidated"
             item["failure_reason"] = reason
             item["notified"] = False
@@ -770,7 +877,7 @@ def invalidate_consults_for_binding(
         data = _load()
         for item in data["consult_requests"]:
             if (
-                item.get("state") in {"pending", "claimed"}
+                item.get("state") in {"pending", "claimed", "responded"}
                 and _consult_source_matches(item, binding)
             ):
                 item["state"] = "invalidated"
@@ -823,13 +930,45 @@ def respond(
         ), None)
         if item is None:
             raise KeyError("Team Lead 工作不存在")
+        snapshot = dict(item)
+        consult = next((
+            row for row in data["consult_requests"]
+            if row.get("work_id") == work_id
+            and _consult_source_matches(row, binding)
+        ), None)
+        routing = snapshot.get("routing")
+        if not isinstance(routing, dict):
+            raise ValueError("团队工作尚未完成系统路由")
+        route = routing.get("route")
+        if not team_message_routing.valid_routing(routing):
+            raise ValueError("Team 消息路由无效")
+        expected_body: str | None = None
+        if route == "local_lead":
+            if (
+                not isinstance(consult, dict)
+                or consult.get("state") != "responded"
+                or not isinstance(consult.get("response"), str)
+                or not consult["response"].strip()
+            ):
+                raise ValueError("必须等待已选择的本地开发 Lead 答复")
+            expected_body = consult["response"]
+        elif route == "context_pack":
+            expected_body = team_message_routing.context_answer(
+                snapshot.get("context_pack", {}), str(routing.get("reason") or ""),
+            )
+            if expected_body is None:
+                raise ValueError("Context Pack 无法完整回答该消息")
+        if (
+            expected_body is not None
+            and response["body_md"].strip() != expected_body.strip()
+        ):
+            raise ValueError("回复必须原样使用系统选定来源的答案")
         saved_response = item.get("response")
         if saved_response is not None and saved_response != response:
             raise ValueError("该团队工作已用不同内容提交")
         item["response"] = dict(response)
         item["state"] = "responding"
         _write(data)
-        snapshot = dict(item)
     base = {
         "client_session_id": str(binding["client_session_id"]),
         "reply_token": str(binding["reply_token"]),
@@ -852,7 +991,9 @@ def respond(
     with _lock:
         data = _load()
         consulted = any(
-            row.get("work_id") == work_id and row.get("state") == "responded"
+            row.get("work_id") == work_id
+            and _consult_source_matches(row, binding)
+            and row.get("state") == "responded"
             for row in data["consult_requests"]
         )
         evidence = {
@@ -862,6 +1003,7 @@ def respond(
             "work_id": work_id,
             **_reply_context_evidence(snapshot.get("context_pack")),
             "consulted": consulted,
+            "answer_source": route,
         }
         existing = next((
             row for row in data["reply_evidence"]

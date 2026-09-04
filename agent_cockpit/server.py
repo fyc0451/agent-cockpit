@@ -63,6 +63,7 @@ from . import next_profile
 from . import team_sessions
 from . import team_lead_worker
 from . import team_context_pack
+from . import team_message_routing
 from . import terminal
 from . import version
 from . import source_upgrade
@@ -4631,6 +4632,19 @@ def _context_pack_for_binding(binding: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _team_consult_target_snapshot(target: dict[str, Any]) -> dict[str, Any]:
+    lead = target.get("lead") if isinstance(target.get("lead"), dict) else {}
+    return {
+        "session": target["session"],
+        "session_generation": target["generation"],
+        "mail_project": target["mail_project"],
+        "lead": {
+            key: lead.get(key)
+            for key in ("agent", "mail_name", "participant_id")
+        },
+    }
+
+
 def _public_context_summary(binding: dict[str, Any]) -> dict[str, Any]:
     """Topic UI 使用的白名单摘要；采样时间不进入确定性 Context Pack。"""
     pack = _context_pack_for_binding(binding)
@@ -5616,8 +5630,9 @@ def _team_lead_worker_tick() -> None:
                 logger.exception("Team Lead 状态心跳失败")
         try:
             _notify_pending_project_consults()
+            _notify_pending_consult_answers()
         except Exception:
-            logger.exception("项目咨询提醒 tick 失败")
+            logger.exception("项目咨询提醒或答复唤醒 tick 失败")
 
 
 def _notify_team_lead_work(session: str, pane_id: str, prompt: str) -> bool:
@@ -5765,6 +5780,118 @@ def _consult_live_source(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _prepare_team_work(
+    binding: dict[str, Any], work: dict[str, Any],
+) -> dict[str, Any]:
+    """冻结 Context Pack 与系统路由，并按需创建唯一的本地咨询。"""
+    work_id = str(work.get("work_id") or "")
+    context_pack = team_lead_worker.attach_context_pack(
+        work_id, binding, _context_pack_for_binding(binding),
+    )
+    saved_routing = work.get("routing")
+    if isinstance(saved_routing, dict):
+        if not team_message_routing.valid_routing(saved_routing):
+            raise ValueError("Team 消息路由无效")
+        routing = dict(saved_routing)
+    else:
+        routing = team_message_routing.classify(
+            work.get("message") if isinstance(work.get("message"), dict) else {},
+        )
+        if (
+            routing["route"] == "context_pack"
+            and team_message_routing.context_answer(
+                context_pack, routing["reason"],
+            ) is None
+        ):
+            routing = {
+                "route": "local_lead",
+                "reason": "context_pack_unavailable",
+            }
+        routing = team_lead_worker.attach_routing(work_id, binding, routing)
+
+    public_routing: dict[str, Any] = dict(routing)
+    if routing.get("route") == "team_agent":
+        public_routing["state"] = "ready"
+    elif routing.get("route") == "context_pack":
+        answer = team_message_routing.context_answer(
+            context_pack, str(routing.get("reason") or ""),
+        )
+        if answer is None:
+            public_routing.update({
+                "state": "blocked",
+                "detail": "Context Pack 无法完整回答；系统拒绝猜测",
+            })
+        else:
+            public_routing.update({"state": "ready", "required_answer": answer})
+    else:
+        consult = team_lead_worker.consult_for_binding(work_id, binding)
+        if consult is None:
+            target, reason = _resolved_consult_target(
+                binding, _team_session_candidates(),
+            )
+            question = team_message_routing.consult_question(
+                work.get("message") if isinstance(work.get("message"), dict) else {},
+            )
+            if target is None:
+                public_routing.update({
+                    "state": "blocked",
+                    "detail": reason or "尚未选择同项目普通开发 Lead",
+                })
+            elif question is None:
+                public_routing.update({
+                    "state": "blocked",
+                    "detail": "消息超过安全咨询长度，请由 Human 手动交给本地会话",
+                })
+            else:
+                consult = team_lead_worker.create_consult(
+                    work_id,
+                    binding,
+                    _team_consult_target_snapshot(target),
+                    kind="evidence",
+                    question=question,
+                )
+                _notify_pending_project_consults()
+        if consult is not None:
+            snapshot = team_lead_worker.consult_snapshot(str(consult["request_id"]))
+            if consult.get("state") in {"pending", "claimed", "responded"}:
+                source_live = (
+                    snapshot is not None
+                    and _consult_live_source(snapshot) is not None
+                )
+                target_live = (
+                    snapshot is not None
+                    and _consult_live_target(snapshot) is not None
+                )
+                if not source_live or not target_live:
+                    if snapshot is not None:
+                        team_lead_worker.invalidate_consult(
+                            str(consult["request_id"]),
+                            "source_identity_changed" if not source_live
+                            else "target_identity_changed",
+                        )
+                    consult = team_lead_worker.consult_for_binding(work_id, binding)
+            state = consult.get("state")
+            if state == "responded" and isinstance(consult.get("response"), str):
+                public_routing.update({
+                    "state": "ready",
+                    "required_answer": consult["response"],
+                    "consult_request_id": consult["request_id"],
+                })
+            elif state in {"pending", "claimed"}:
+                public_routing.update({
+                    "state": "waiting",
+                    "detail": "等待已选择的本地开发 Lead 答复",
+                    "consult_request_id": consult["request_id"],
+                })
+            else:
+                public_routing.update({
+                    "state": "blocked",
+                    "detail": "本地开发 Lead 咨询已失效，需要处理下一条新消息",
+                    "consult_request_id": consult.get("request_id"),
+                })
+    return {**work, "context_pack": context_pack, "routing": public_routing}
+
+
 def _notify_pending_project_consults() -> None:
     for snapshot in team_lead_worker.pending_consult_notifications():
         request_id = str(snapshot.get("request_id") or "")
@@ -5788,16 +5915,53 @@ def _notify_pending_project_consults() -> None:
             continue
         lead = candidate.get("lead") if isinstance(candidate.get("lead"), dict) else {}
         prompt = (
-            "[项目上下文咨询] Team Agent 需要一条事实性上下文，"
+            "[项目上下文咨询] Team 消息已由系统确定性路由到当前普通开发 Lead，"
             f"request_id {request_id}。请通过 Cockpit 本机 "
             "agent-mail-tools/project-consult 主动读取并答复。"
-            "团队原文不会注入当前 pane；只回答状态、决策、证据或阻塞，"
-            "不要替 Team Session 执行任务。"
+            "团队原文不会注入当前 pane；主动读取后请给出可直接回传的完整答案、"
+            "必要证据和明确下一步，但不要替 Team Session 执行任务或改变本地状态。"
         )
         if _notify_team_lead_work(
             str(candidate["session"]), str(lead.get("pane_id") or ""), prompt,
         ):
             team_lead_worker.mark_consult_notified(request_id)
+
+
+def _notify_pending_consult_answers() -> None:
+    """本地 Lead 答复后仅用固定 ID 唤醒原 Team Agent。"""
+    for snapshot in team_lead_worker.pending_consult_answer_notifications():
+        request_id = str(snapshot.get("request_id") or "")
+        source = _consult_live_source(snapshot)
+        target = _consult_live_target(snapshot)
+        if source is None or target is None:
+            team_lead_worker.invalidate_consult(
+                request_id,
+                "source_identity_changed" if source is None
+                else "target_identity_changed",
+            )
+            continue
+        lead = source.get("lead") if isinstance(source.get("lead"), dict) else {}
+        command = None
+        if str(lead.get("agent") or "").lower() == "codex":
+            command = herdr_client.team_codex_work_command(
+                str(snapshot.get("source_session_generation") or ""),
+                str(snapshot.get("source_mail_project") or ""),
+            )
+        command_hint = (
+            f"请原样执行 {command} --work-id {snapshot.get('work_id')} --consult-status。"
+            if command else
+            "请用 Team Work 本机命令和该 work_id 主动读取咨询状态。"
+        )
+        prompt = (
+            "[项目咨询答复已就绪] "
+            f"request_id {request_id}，本地工作号 {snapshot.get('work_id')}。"
+            f"{command_hint}提醒中不含团队正文或咨询答案；读取后必须原样使用 "
+            "routing.required_answer 提交回复，不得改写。"
+        )
+        if _notify_team_lead_work(
+            str(source["session"]), str(lead.get("pane_id") or ""), prompt,
+        ):
+            team_lead_worker.mark_consult_answer_notified(request_id)
 
 
 @app.post("/api/agent/team-work/next")
@@ -5818,17 +5982,23 @@ async def api_team_agent_work_next(request: Request):
         raise HTTPException(503, "团队工作队列暂时不可用") from exc
     if work is not None:
         try:
-            work["context_pack"] = team_lead_worker.attach_context_pack(
-                str(work["work_id"]), binding, _context_pack_for_binding(binding),
-            )
+            work = _prepare_team_work(binding, work)
         except KeyError as exc:
             raise HTTPException(409, "团队工作已变化，请重新读取") from exc
-    return {"status": "pending" if work is not None else "empty", "work": work}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(503, "团队路由或咨询队列暂时不可用") from exc
+    status = "empty"
+    if work is not None:
+        routing = work.get("routing") if isinstance(work.get("routing"), dict) else {}
+        status = str(routing.get("state") or "pending")
+    return {"status": status, "work": work}
 
 
 @app.post("/api/agent/team-work/{work_id}/consult")
 async def api_team_agent_work_consult(work_id: str, request: Request):
-    """Team Agent 显式发起咨询；目标只能来自 Human 保存的精确绑定。"""
+    """兼容旧 CLI；咨询内容与目标只能由系统路由和 Human 配置决定。"""
     if not re.fullmatch(r"[0-9a-f]{32}", work_id):
         raise HTTPException(404, "团队工作不存在")
     try:
@@ -5840,34 +6010,18 @@ async def api_team_agent_work_consult(work_id: str, request: Request):
     }
     if not isinstance(body, dict) or set(body) - allowed:
         raise HTTPException(400, "咨询请求包含未支持字段")
-    kind = body.get("kind")
-    question = body.get("question")
-    if kind not in {"status", "decision", "evidence", "blocker"}:
-        raise HTTPException(400, "咨询类型无效")
-    if not isinstance(question, str) or not question.strip() or len(question) > 2_000:
-        raise HTTPException(400, "咨询问题无效")
     binding = _team_work_auth(body, request)
-    if team_lead_worker.work_for_binding(work_id, binding) is None:
+    work = team_lead_worker.work_for_binding(work_id, binding)
+    if work is None:
         raise HTTPException(404, "团队工作不存在")
-    target, reason = _resolved_consult_target(binding, _team_session_candidates())
-    if target is None:
-        detail = reason or "尚未显式选择同项目普通开发 Lead"
-        raise HTTPException(409, detail)
-    lead = target.get("lead") if isinstance(target.get("lead"), dict) else {}
-    snapshot = {
-        "session": target["session"],
-        "session_generation": target["generation"],
-        "mail_project": target["mail_project"],
-        "lead": {
-            key: lead.get(key)
-            for key in ("agent", "mail_name", "participant_id")
-        },
-    }
     try:
-        result = team_lead_worker.create_consult(
-            work_id, binding, snapshot, kind=kind, question=question,
-        )
-        _notify_pending_project_consults()
+        prepared = _prepare_team_work(binding, work)
+        routing = prepared.get("routing")
+        if not isinstance(routing, dict) or routing.get("route") != "local_lead":
+            raise HTTPException(409, "系统路由未要求咨询本地开发 Lead")
+        result = team_lead_worker.consult_for_binding(work_id, binding)
+        if result is None:
+            raise HTTPException(409, str(routing.get("detail") or "本地咨询未创建"))
         return {"status": result["state"], "consult": result}
     except KeyError as exc:
         raise HTTPException(404, "团队工作不存在") from exc
@@ -5890,8 +6044,17 @@ async def api_team_agent_work_consult_status(work_id: str, request: Request):
     }:
         raise HTTPException(400, "咨询状态请求包含未支持字段")
     binding = _team_work_auth(body, request)
+    work = team_lead_worker.work_for_binding(work_id, binding)
+    if work is None:
+        raise HTTPException(404, "团队工作不存在")
+    try:
+        prepared = _prepare_team_work(binding, work)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(503, "咨询队列暂时不可用") from exc
     result = team_lead_worker.consult_for_binding(work_id, binding)
-    if result is not None and result.get("state") in {"pending", "claimed"}:
+    if result is not None and result.get("state") in {"pending", "claimed", "responded"}:
         snapshot = team_lead_worker.consult_snapshot(str(result["request_id"]))
         source_live = snapshot is not None and _consult_live_source(snapshot) is not None
         target_live = snapshot is not None and _consult_live_target(snapshot) is not None
@@ -5906,7 +6069,12 @@ async def api_team_agent_work_consult_status(work_id: str, request: Request):
                     ),
                 )
             result = team_lead_worker.consult_for_binding(work_id, binding)
-    return {"status": result["state"] if result is not None else "empty", "consult": result}
+            prepared = _prepare_team_work(binding, work)
+    return {
+        "status": result["state"] if result is not None else "empty",
+        "consult": result,
+        "routing": prepared.get("routing"),
+    }
 
 
 @app.post("/api/agent/project-consult/next")
@@ -5975,6 +6143,7 @@ async def api_project_consult_respond(request_id: str, request: Request):
         result = team_lead_worker.respond_consult(
             request_id, project, sender_name, response,
         )
+        _notify_pending_consult_answers()
         return {"status": result["state"], "consult": result}
     except KeyError as exc:
         raise HTTPException(404, "咨询请求不存在") from exc
@@ -6027,6 +6196,19 @@ async def api_team_agent_work_respond(work_id: str, request: Request):
     try:
         with _TEAM_SESSION_BIND_LOCK:
             binding = _team_work_auth(body, request)
+            work = team_lead_worker.work_for_binding(work_id, binding)
+            if work is None:
+                raise KeyError("团队工作不存在")
+            prepared = _prepare_team_work(binding, work)
+            routing = prepared.get("routing")
+            if not isinstance(routing, dict) or routing.get("state") != "ready":
+                raise ValueError(
+                    str(
+                        routing.get("detail")
+                        if isinstance(routing, dict) else
+                        "团队工作尚未完成系统路由"
+                    )
+                )
             return team_lead_worker.respond(
                 work_id,
                 binding,

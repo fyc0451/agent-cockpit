@@ -563,6 +563,7 @@ describe('TeamTimeline', () => {
               dirty: true,
               handoff_updated: '2026-08-25',
               consulted: true,
+              answer_source: 'local_lead',
               created_ts: 1,
             },
           },
@@ -577,9 +578,9 @@ describe('TeamTimeline', () => {
     render(<TeamTimeline topic="proj-a" topicName="项目 A" />, { wrapper: createWrapper() })
 
     const evidence = await screen.findByLabelText('回复证据')
-    expect(evidence).toHaveTextContent('基于项目上下文')
-    expect(evidence).toHaveTextContent('已咨询本地开发 Agent')
-    expect(within(evidence).getByText('基于项目上下文')).toHaveAttribute(
+    expect(evidence).toHaveTextContent('答复来源：本地开发 Agent')
+    expect(evidence).toHaveTextContent('已冻结项目上下文')
+    expect(within(evidence).getByText('答复来源：本地开发 Agent')).toHaveAttribute(
       'title', expect.stringContaining(`SHA ${'a'.repeat(40)}`),
     )
     expect(within(screen.getByTestId('team-msg-72')).queryByLabelText('回复证据')).toBeNull()

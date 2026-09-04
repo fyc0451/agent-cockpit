@@ -834,10 +834,10 @@ def test_inbox_route_v2_requires_worker_migration(isolated_roots):
     assert result["reason"] == store_schema.REASON_MIGRATION_REQUIRED
 
 
-def test_inbox_route_v6_work_consult_and_evidence_exact_value_shape(isolated_roots):
+def test_inbox_route_v8_work_consult_and_evidence_exact_value_shape(isolated_roots):
     path = runtime_paths.store("inbox_route")
     path.write_text(json.dumps({
-        "version": 6,
+        "version": 8,
         "work_items": [{
             "work_id": "a" * 32,
             "hub": "https://team.example",
@@ -860,10 +860,15 @@ def test_inbox_route_v6_work_consult_and_evidence_exact_value_shape(isolated_roo
                 "sender_name": "Alice",
                 "sender_handle": "alice",
                 "created_ts": "2026-08-23 11:00:00",
+                "attachments": [],
             },
             "state": "pending",
             "notified": False,
             "created_ts": 1.0,
+            "routing": {
+                "route": "local_lead",
+                "reason": "project_detail_requires_local_context",
+            },
         }],
         "consult_requests": [],
         "reply_evidence": [{
@@ -877,6 +882,7 @@ def test_inbox_route_v6_work_consult_and_evidence_exact_value_shape(isolated_roo
             "dirty": True,
             "handoff_updated": "2026-08-25",
             "consulted": True,
+            "answer_source": "local_lead",
             "created_ts": 2.0,
         }],
     }), encoding="utf-8")
@@ -886,6 +892,13 @@ def test_inbox_route_v6_work_consult_and_evidence_exact_value_shape(isolated_roo
     )
 
     data = json.loads(path.read_text(encoding="utf-8"))
+    data["work_items"][0]["routing"]["route"] = "team_agent"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert store_schema._check_versioned_json("inbox_route")["reason"] == (
+        store_schema.REASON_FINGERPRINT_MISMATCH
+    )
+
+    data["work_items"][0]["routing"]["route"] = "local_lead"
     data["reply_evidence"][0]["sha"] = "forged"
     path.write_text(json.dumps(data), encoding="utf-8")
     assert store_schema._check_versioned_json("inbox_route")["reason"] == (
