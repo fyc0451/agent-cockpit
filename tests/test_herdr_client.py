@@ -548,6 +548,151 @@ def test_latest_codex_final_reply_uses_current_turn_structured_message(tmp_path)
     }
 
 
+def _write_kimi_session(
+    home: Path,
+    cwd: Path,
+    session_id: str,
+    *,
+    updated_ms: int,
+    rows: list[dict],
+) -> None:
+    session = (
+        home / "sessions" / herdr_client._kimi_workspace_id(str(cwd)) / session_id
+    )
+    wire = session / "agents" / "main" / "wire.jsonl"
+    wire.parent.mkdir(parents=True)
+    (session / "state.json").write_text(json.dumps({
+        "cwd": str(cwd),
+        "updatedAt": updated_ms,
+        "archived": False,
+    }), encoding="utf-8")
+    wire.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _kimi_completed_rows(turn_id: int, text: str, completed_ms: int) -> list[dict]:
+    step_uuid = f"step-{turn_id}"
+    return [
+        {
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "content.part", "turnId": str(turn_id),
+                "stepUuid": step_uuid,
+                "part": {"type": "text", "text": text},
+            },
+            "time": completed_ms - 2,
+        },
+        {
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "step.end", "turnId": str(turn_id),
+                "uuid": step_uuid, "finishReason": "end_turn",
+            },
+            "time": completed_ms - 1,
+        },
+        {
+            "type": "turn.ended", "turnId": turn_id,
+            "reason": "completed", "time": completed_ms,
+        },
+    ]
+
+
+def test_latest_kimi_final_reply_resolves_stale_herdr_session_id(tmp_path):
+    home = tmp_path / "kimi"
+    cwd = tmp_path / "workspace"
+    (home / "sessions").mkdir(parents=True)
+    cwd.mkdir()
+    stale_id = "session_11111111-1111-4111-8111-111111111111"
+    current_id = "session_22222222-2222-4222-8222-222222222222"
+    _write_kimi_session(
+        home, cwd, stale_id, updated_ms=10_000,
+        rows=_kimi_completed_rows(1, "上一轮旧回复", 10_000),
+    )
+    rows = [{
+        "type": "context.append_loop_event",
+        "event": {
+            "type": "content.part", "turnId": "2", "stepUuid": "tool-step",
+            "part": {"type": "text", "text": "处理中，不是最终答案"},
+        },
+        "time": 29_000,
+    }, {
+        "type": "context.append_loop_event",
+        "event": {
+            "type": "step.end", "turnId": "2", "uuid": "tool-step",
+            "finishReason": "tool_use",
+        },
+        "time": 29_001,
+    }, *_kimi_completed_rows(2, "本轮完整最终回复\n\n第二段也必须保留。", 30_000)]
+    _write_kimi_session(home, cwd, current_id, updated_ms=30_000, rows=rows)
+
+    result = herdr_client.latest_kimi_final_reply(
+        {"agent": "kimi", "kind": "id", "value": stale_id},
+        since_ms=20_000,
+        cwd=str(cwd),
+        kimi_home=str(home),
+    )
+
+    assert result == {
+        "available": True,
+        "text": "本轮完整最终回复\n\n第二段也必须保留。",
+        "created_ms": 30_000,
+        "session_id": current_id,
+    }
+
+
+def test_latest_kimi_final_reply_waits_for_completed_turn(tmp_path):
+    home = tmp_path / "kimi"
+    cwd = tmp_path / "workspace"
+    (home / "sessions").mkdir(parents=True)
+    cwd.mkdir()
+    session_id = "session_33333333-3333-4333-8333-333333333333"
+    _write_kimi_session(home, cwd, session_id, updated_ms=30_000, rows=[{
+        "type": "context.append_loop_event",
+        "event": {
+            "type": "content.part", "turnId": "3", "stepUuid": "step-3",
+            "part": {"type": "text", "text": "只有第一句，后面仍在生成"},
+        },
+        "time": 30_000,
+    }])
+
+    result = herdr_client.latest_kimi_final_reply(
+        {"agent": "kimi", "kind": "id", "value": session_id},
+        since_ms=20_000,
+        cwd=str(cwd),
+        kimi_home=str(home),
+    )
+
+    assert result == {"available": True, "text": ""}
+
+
+def test_latest_kimi_final_reply_fails_closed_when_workspace_is_ambiguous(tmp_path):
+    home = tmp_path / "kimi"
+    cwd = tmp_path / "workspace"
+    (home / "sessions").mkdir(parents=True)
+    cwd.mkdir()
+    first_id = "session_44444444-4444-4444-8444-444444444444"
+    second_id = "session_55555555-5555-4555-8555-555555555555"
+    _write_kimi_session(
+        home, cwd, first_id, updated_ms=30_000,
+        rows=_kimi_completed_rows(4, "实例一回复", 30_000),
+    )
+    _write_kimi_session(
+        home, cwd, second_id, updated_ms=31_000,
+        rows=_kimi_completed_rows(5, "实例二回复", 31_000),
+    )
+
+    result = herdr_client.latest_kimi_final_reply(
+        {"agent": "kimi", "kind": "id", "value": first_id},
+        since_ms=20_000,
+        cwd=str(cwd),
+        kimi_home=str(home),
+    )
+
+    assert result == {"available": True, "text": "", "ambiguous": True}
+
+
 def test_latest_codex_commentary_returns_current_turn_newest_first(tmp_path):
     home = tmp_path / "private-codex"
     home.mkdir(mode=0o700)

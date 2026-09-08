@@ -2897,6 +2897,96 @@ def test_harvest_codex_uses_structured_final_instead_of_stale_screen(
     assert rows[0]["text"] == "收到了，这是本轮准确回复。"
 
 
+def test_harvest_kimi_uses_completed_structured_final_instead_of_partial_screen(
+    isolated_ledger, monkeypatch,
+):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-kimi-final", "chat-kimi")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._PANE_IDLE_SINCE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    key = ("chat-kimi", "w1:p3")
+    server._PANE_TURN_STARTED[key] = 1_800_000_000_000
+    panes = [{
+        "session": "chat-kimi",
+        "pane_id": "w1:p3",
+        "agent": "kimi",
+        "agent_status": "idle",
+        "cwd": str(isolated_ledger / "harvest-kimi-final"),
+        "mail_name": "StormyCastle",
+        "agent_session": {
+            "agent": "kimi",
+            "kind": "id",
+            "value": "session_11111111-1111-4111-8111-111111111111",
+        },
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client,
+        "latest_kimi_final_reply",
+        lambda *_a, **_k: {
+            "available": True,
+            "text": "完整结论。\n\n1. 第一段证据。\n2. 第二段证据。",
+        },
+    )
+    monkeypatch.setattr(
+        server.herdr_client,
+        "pane_summary",
+        lambda *_a, **_k: pytest.fail("completed Kimi turn must avoid partial screen"),
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+
+    server._harvest_settled_replies("chat-kimi")
+
+    rows = chat_ledger.list_messages("chat-kimi", 10)
+    assert len(rows) == 1
+    assert rows[0]["text"] == "完整结论。\n\n1. 第一段证据。\n2. 第二段证据。"
+
+
+def test_harvest_kimi_does_not_fall_back_before_structured_turn_completes(
+    isolated_ledger, monkeypatch,
+):
+    client = _client()
+    _workspace_with_thread(client, isolated_ledger / "harvest-kimi-wait", "chat-kimi")
+    server._PANE_LAST_STATUS.clear()
+    server._PANE_LAST_HARVEST.clear()
+    server._PANE_LAST_MESSAGE.clear()
+    server._PANE_TURN_STARTED.clear()
+    server._PANE_IDLE_SINCE.clear()
+    server._HARVEST_STATUS_LOADED = True
+    key = ("chat-kimi", "w1:p3")
+    server._PANE_TURN_STARTED[key] = 1_800_000_000_000
+    panes = [{
+        "session": "chat-kimi", "pane_id": "w1:p3", "agent": "kimi",
+        "agent_status": "idle", "cwd": str(isolated_ledger / "harvest-kimi-wait"),
+        "mail_name": "StormyCastle",
+        "agent_session": {
+            "agent": "kimi", "kind": "id",
+            "value": "session_11111111-1111-4111-8111-111111111111",
+        },
+    }]
+    monkeypatch.setattr(server, "_herdr_runtime_snapshot", lambda: {"panes": panes})
+    monkeypatch.setattr(server, "_enrich_board_identities", lambda snap: snap)
+    monkeypatch.setattr(
+        server.herdr_client, "latest_kimi_final_reply",
+        lambda *_a, **_k: {"available": True, "text": ""},
+    )
+    monkeypatch.setattr(
+        server.herdr_client, "pane_summary",
+        lambda *_a, **_k: pytest.fail("unfinished Kimi turn must not scrape its screen"),
+    )
+    monkeypatch.setattr(server.db, "status", lambda: {"available": False})
+
+    server._harvest_settled_replies("chat-kimi")
+
+    assert chat_ledger.list_messages("chat-kimi", 10) == []
+    assert key in server._PANE_TURN_STARTED
+
+
 def test_merge_chat_timeline_keeps_later_distinct_claude_reply():
     old = (
         "agent_cockpit/ 下有 17 个 Python 测试文件，但没有 requirements.txt。"
@@ -4119,6 +4209,7 @@ def test_kimi_banner_and_idle_chrome_are_not_harvested():
         "\n"
         ">\n"
         " yolo  K3 thinking: high  ~/github/agent-cockpit  main [+1101 -68]  @: mention files\n"
+        " Ask When Needed  K3 thinking: max  ~/github/agent-cockpit  /init: generate AGENTS.md\n"
     )
     text = server._extract_harvest_text(screen)
     assert "协作约定已了解" in text
@@ -4131,7 +4222,9 @@ def test_kimi_banner_and_idle_chrome_are_not_harvested():
     assert "No session yet" not in text
     assert "yolo" not in text
     assert "thinking: high" not in text
+    assert "thinking: max" not in text
     assert "mention files" not in text
+    assert "generate AGENTS.md" not in text
 
 
 def test_kimi_tool_echo_screen_slices_to_conclusion():

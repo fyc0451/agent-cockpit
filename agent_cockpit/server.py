@@ -7614,9 +7614,10 @@ def _harvest_skip_line(stripped: str) -> bool:
         return True
     if re.search(r"\(\d+ more lines?, ctrl\+o to expand\)", stripped):
         return True
-    if re.match(r"^(?:yolo|default|auto|plan)\b", stripped) and re.search(
-        r"\bthinking:\s*\w+", stripped
-    ):
+    if (
+        re.match(r"^(?:yolo|default|auto|plan)\b", stripped)
+        or stripped.startswith("Ask When Needed ")
+    ) and re.search(r"\bK\S*\s+thinking:\s*\w+", stripped):
         return True
     if re.match(r"^(?:@:\s|!\s*to run a shell command)", stripped):
         return True
@@ -8210,15 +8211,21 @@ def _harvest_settled_replies(session: str, snap: dict[str, Any] | None = None) -
             # 刚停下，终端可能还在画最后一帧，等稳定窗过了再收。
             continue
         turn_started = _PANE_TURN_STARTED.get(key)
-        structured = (
-            herdr_client.latest_codex_final_reply(
+        agent_kind = str(pane.get("agent") or "")
+        if agent_kind == "codex" and turn_started is not None:
+            structured = herdr_client.latest_codex_final_reply(
                 pane.get("agent_session"),
                 since_ms=turn_started,
                 codex_home=pane.get("codex_home"),
             )
-            if pane.get("agent") == "codex" and turn_started is not None
-            else {"available": False, "text": ""}
-        )
+        elif agent_kind == "kimi" and turn_started is not None:
+            structured = herdr_client.latest_kimi_final_reply(
+                pane.get("agent_session"),
+                since_ms=turn_started,
+                cwd=pane.get("cwd") or pane.get("foreground_cwd"),
+            )
+        else:
+            structured = {"available": False, "text": ""}
         if structured.get("available"):
             raw = str(structured.get("text") or "").strip()
             text = raw

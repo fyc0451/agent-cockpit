@@ -1066,6 +1066,8 @@ def pane_summary(session: str, pane_id: str, max_lines: int = 30) -> dict[str, A
 
 _CODEX_SESSION_ID_RE = re.compile(r"[0-9a-fA-F-]{36}")
 _CODEX_ROLLOUT_CACHE: dict[tuple[str, str], Path] = {}
+_KIMI_SESSION_ID_RE = re.compile(r"session_[0-9a-fA-F-]{36}")
+_KIMI_WIRE_TAIL_BYTES = 8 * 1024 * 1024
 
 
 def latest_codex_commentary(
@@ -1216,6 +1218,163 @@ def latest_codex_final_reply(
         ).strip()
         if text:
             return {"available": True, "text": text, "created_ms": created_ms}
+    return {"available": True, "text": ""}
+
+
+def _kimi_timestamp_ms(value: object) -> int:
+    if type(value) is int:
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if not isinstance(value, str) or not value.strip():
+        return 0
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    return int(parsed.timestamp() * 1000)
+
+
+def _latest_kimi_completed_reply(path: Path, since_ms: int) -> dict[str, Any]:
+    """从 Kimi wire 只取已 `end_turn` 的最后一段正文。"""
+    if path.is_symlink() or not path.is_file():
+        return {"text": ""}
+    try:
+        with path.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - _KIMI_WIRE_TAIL_BYTES))
+            if stream.tell() > 0:
+                stream.readline()
+            raw_lines = stream.read().splitlines()
+    except OSError:
+        return {"text": ""}
+    rows: list[dict[str, Any]] = []
+    for raw_line in raw_lines:
+        try:
+            row = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    for ended_index in range(len(rows) - 1, -1, -1):
+        ended = rows[ended_index]
+        if ended.get("type") != "turn.ended" or ended.get("reason") != "completed":
+            continue
+        completed_ms = _kimi_timestamp_ms(ended.get("time"))
+        if completed_ms < since_ms:
+            break
+        turn_id = str(ended.get("turnId") or "")
+        if not turn_id:
+            continue
+        final_step: dict[str, Any] | None = None
+        final_step_index = -1
+        for index in range(ended_index - 1, -1, -1):
+            row = rows[index]
+            event = row.get("event") if row.get("type") == "context.append_loop_event" else None
+            if not isinstance(event, dict):
+                continue
+            if str(event.get("turnId") or "") != turn_id:
+                continue
+            if event.get("type") == "step.end" and event.get("finishReason") == "end_turn":
+                final_step = event
+                final_step_index = index
+                break
+        if final_step is None:
+            continue
+        step_uuid = str(final_step.get("uuid") or "")
+        parts: list[str] = []
+        for row in rows[:final_step_index]:
+            event = row.get("event") if row.get("type") == "context.append_loop_event" else None
+            if not isinstance(event, dict) or event.get("type") != "content.part":
+                continue
+            if str(event.get("turnId") or "") != turn_id:
+                continue
+            if step_uuid and str(event.get("stepUuid") or "") != step_uuid:
+                continue
+            part = event.get("part")
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        text = "".join(parts).strip()
+        if text:
+            return {"text": text, "created_ms": completed_ms}
+    return {"text": ""}
+
+
+def latest_kimi_final_reply(
+    agent_session: object,
+    *,
+    since_ms: int,
+    cwd: object,
+    kimi_home: object = None,
+) -> dict[str, Any]:
+    """读取本轮唯一、已完成的 Kimi 最终答复。
+
+    Herdr 可能在 Kimi `/resume` 后暂时保留旧 session id，因此先校验该 id，
+    再按 pane 的规范工作目录查 Kimi workspace。只有一个会话在本轮完成时才
+    返回正文；多个候选一律 fail closed，不能把同目录另一实例的回复串进来。
+    """
+    if not isinstance(agent_session, dict):
+        return {"available": False, "text": ""}
+    if agent_session.get("agent") != "kimi" or agent_session.get("kind") != "id":
+        return {"available": False, "text": ""}
+    reported_id = str(agent_session.get("value") or "")
+    if _KIMI_SESSION_ID_RE.fullmatch(reported_id) is None:
+        return {"available": False, "text": ""}
+    if not isinstance(cwd, str) or not Path(cwd).is_absolute() or "\x00" in cwd:
+        return {"available": False, "text": ""}
+    try:
+        canonical_cwd = str(Path(cwd).resolve(strict=True))
+        home = Path(kimi_home) if kimi_home is not None else _kimi_config_home()
+        sessions_root = (home / "sessions").resolve(strict=True)
+        workspace = sessions_root / _kimi_workspace_id(canonical_cwd)
+        if workspace.is_symlink() or not workspace.is_dir():
+            return {"available": False, "text": ""}
+        workspace = workspace.resolve(strict=True)
+        if workspace.parent != sessions_root:
+            return {"available": False, "text": ""}
+    except (OSError, ValueError):
+        return {"available": False, "text": ""}
+
+    candidates = sorted(
+        (
+            path for path in workspace.glob("session_*")
+            if _KIMI_SESSION_ID_RE.fullmatch(path.name)
+            and path.is_dir()
+            and not path.is_symlink()
+        ),
+        key=lambda path: (path.name != reported_id, path.name),
+    )
+    completed: list[dict[str, Any]] = []
+    for session_dir in candidates:
+        state_path = session_dir / "state.json"
+        wire_path = session_dir / "agents" / "main" / "wire.jsonl"
+        if state_path.is_symlink() or wire_path.is_symlink():
+            continue
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(state, dict) or state.get("archived") is True:
+            continue
+        try:
+            state_cwd = str(Path(str(state.get("cwd") or "")).resolve(strict=True))
+        except (OSError, ValueError):
+            continue
+        if state_cwd != canonical_cwd:
+            continue
+        updated_ms = _kimi_timestamp_ms(state.get("updatedAt"))
+        if updated_ms and updated_ms < since_ms:
+            continue
+        reply = _latest_kimi_completed_reply(wire_path, since_ms)
+        if reply.get("text"):
+            completed.append({**reply, "session_id": session_dir.name})
+    if len(completed) == 1:
+        return {"available": True, **completed[0]}
+    if len(completed) > 1:
+        return {"available": True, "text": "", "ambiguous": True}
+    # workspace 与结构化记录存在但本轮尚未 end_turn：继续等，禁止退化为半屏抓取。
     return {"available": True, "text": ""}
 
 
