@@ -60,8 +60,36 @@ export function mergePaneOutput(
   ) {
     overlap -= 1
   }
-  const merged = overlap > 0
-    ? [...beforeLines, ...nextLines.slice(overlap)].join('\n')
+  if (overlap > 0) {
+    return tailOutput([...beforeLines, ...nextLines.slice(overlap)].join('\n'), limit)
+  }
+
+  // Pane read 是滚动尾窗；状态栏常只改最后几行。用稳定的大段前缀定位
+  // 新快照在旧历史中的位置，替换旧状态尾部，避免把近乎整屏重复追加。
+  let anchorStart = -1
+  let anchorLength = 0
+  const searchStart = Math.max(0, beforeLines.length - nextLines.length - 8)
+  for (let start = searchStart; start < beforeLines.length; start += 1) {
+    let length = 0
+    while (
+      start + length < beforeLines.length
+      && length < nextLines.length
+      && beforeLines[start + length] === nextLines[length]
+    ) length += 1
+    if (length > anchorLength || (length === anchorLength && start > anchorStart)) {
+      anchorStart = start
+      anchorLength = length
+    }
+  }
+  const staleTail = beforeLines.length - anchorStart - anchorLength
+  const reliableAnchor = anchorLength >= 3
+    && (anchorLength >= 8 || anchorLength * 2 >= nextLines.length)
+    && staleTail <= Math.max(8, Math.ceil(nextLines.length / 4))
+  const merged = reliableAnchor
+    ? [
+      ...beforeLines.slice(0, anchorStart + anchorLength),
+      ...nextLines.slice(anchorLength),
+    ].join('\n')
     : `${before}\n${next}`
   return tailOutput(merged, limit)
 }
@@ -74,12 +102,14 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
   const [busy, setBusy] = useState(false)
   const screenRef = useRef<HTMLPreElement>(null)
   const followTailRef = useRef(true)
+  const lastScrollTopRef = useRef(0)
 
   useEffect(() => {
     setOutput('')
     setLayout('log')
     setError(null)
     followTailRef.current = true
+    lastScrollTopRef.current = 0
     const socket = new WebSocket(paneLiveWebSocketUrl(session, member.paneId))
     socket.onmessage = (event) => {
       let payload: {
@@ -113,7 +143,10 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
 
   useLayoutEffect(() => {
     const screen = screenRef.current
-    if (screen && followTailRef.current) screen.scrollTop = screen.scrollHeight
+    if (screen && followTailRef.current) {
+      screen.scrollTop = screen.scrollHeight
+      lastScrollTopRef.current = screen.scrollTop
+    }
   }, [output])
 
   const send = async (text: string, mode: 'keys' | 'slash' | 'prompt') => {
@@ -180,8 +213,13 @@ export function AgentInteractModal({ member, session, onClose }: AgentInteractMo
           tabIndex={0}
           onScroll={(event) => {
             const screen = event.currentTarget
-            followTailRef.current =
-              screen.scrollHeight - screen.scrollTop - screen.clientHeight <= 24
+            const scrollTop = screen.scrollTop
+            const movedUp = scrollTop < lastScrollTopRef.current - 1
+            const nearBottom =
+              screen.scrollHeight - scrollTop - screen.clientHeight <= 24
+            if (movedUp) followTailRef.current = false
+            else if (nearBottom) followTailRef.current = true
+            lastScrollTopRef.current = scrollTop
           }}
         >
           {output || '正在读取终端…'}

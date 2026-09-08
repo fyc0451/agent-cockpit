@@ -65,6 +65,17 @@ describe('AgentInteractModal 只读现场流', () => {
     expect(bounded).toMatch(/fresh-two$/)
   })
 
+  it('滚动尾窗只替换变化尾部，不重复追加几乎相同的整屏', () => {
+    const stable = Array.from({ length: 12 }, (_, index) => `稳定输出 ${index + 1}`)
+    const previous = ['更早输出', ...stable, 'Working 1', 'elapsed 1s', '等待中'].join('\n')
+    const snapshot = [...stable, 'Working 2', 'elapsed 2s', '等待中'].join('\n')
+
+    const merged = mergePaneOutput(previous, snapshot)
+
+    expect(merged).toBe(['更早输出', ...stable, 'Working 2', 'elapsed 2s', '等待中'].join('\n'))
+    expect(merged.split('\n').filter((line) => line === '稳定输出 1')).toHaveLength(1)
+  })
+
   it('Grok TUI 整屏替换，不把每一帧追加成流水', () => {
     const frame1 = [
       '     ▾ Tasks 1',
@@ -112,15 +123,20 @@ describe('AgentInteractModal 只读现场流', () => {
       <AgentInteractModal member={member} session="cockpit" onClose={vi.fn()} />,
     )
     const socket = FakeWebSocket.instance
+    const height = { current: 1000 }
+    const log = screen.getByRole('log', { name: '只读终端现场' })
+    Object.defineProperty(log, 'scrollHeight', {
+      configurable: true,
+      get: () => height.current,
+    })
+    Object.defineProperty(log, 'clientHeight', { configurable: true, value: 200 })
     await act(async () => {
       socket?.onmessage?.({
         data: JSON.stringify({ type: 'snapshot', output: 'one\ntwo\nthree', error: null }),
       })
     })
 
-    const log = screen.getByRole('log', { name: '只读终端现场' })
-    Object.defineProperty(log, 'scrollHeight', { configurable: true, value: 1000 })
-    Object.defineProperty(log, 'clientHeight', { configurable: true, value: 200 })
+    expect(log.scrollTop).toBe(1000)
     log.scrollTop = 120
     fireEvent.scroll(log)
 
@@ -132,6 +148,37 @@ describe('AgentInteractModal 只读现场流', () => {
 
     expect(log.scrollTop).toBe(120)
     expect(log).toHaveTextContent('four')
+  })
+
+  it('内容增长触发 scroll 时仍跟随底部，不误判成用户上滑', async () => {
+    render(
+      <AgentInteractModal member={member} session="cockpit" onClose={vi.fn()} />,
+    )
+    const socket = FakeWebSocket.instance
+    const height = { current: 1000 }
+    const log = screen.getByRole('log', { name: '只读终端现场' })
+    Object.defineProperty(log, 'scrollHeight', {
+      configurable: true,
+      get: () => height.current,
+    })
+    Object.defineProperty(log, 'clientHeight', { configurable: true, value: 200 })
+
+    await act(async () => {
+      socket?.onmessage?.({
+        data: JSON.stringify({ type: 'snapshot', output: 'one\ntwo\nthree', error: null }),
+      })
+    })
+    expect(log.scrollTop).toBe(1000)
+
+    height.current = 1400
+    fireEvent.scroll(log)
+    await act(async () => {
+      socket?.onmessage?.({
+        data: JSON.stringify({ type: 'snapshot', output: 'two\nthree\nfour', error: null }),
+      })
+    })
+
+    expect(log.scrollTop).toBe(1400)
   })
 
   it('窄屏折行在宽现场里按句子回放，不占半列', async () => {
