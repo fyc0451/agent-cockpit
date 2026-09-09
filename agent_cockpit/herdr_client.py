@@ -1236,7 +1236,7 @@ def _kimi_timestamp_ms(value: object) -> int:
 
 
 def _latest_kimi_completed_reply(path: Path, since_ms: int) -> dict[str, Any]:
-    """从 Kimi wire 只取已 `end_turn` 的最后一段正文。"""
+    """从 Kimi wire 只取本窗口内唯一已 `end_turn` 的正文。"""
     if path.is_symlink() or not path.is_file():
         return {"text": ""}
     try:
@@ -1256,6 +1256,7 @@ def _latest_kimi_completed_reply(path: Path, since_ms: int) -> dict[str, Any]:
             continue
         if isinstance(row, dict):
             rows.append(row)
+    completed: list[dict[str, Any]] = []
     for ended_index in range(len(rows) - 1, -1, -1):
         ended = rows[ended_index]
         if ended.get("type") != "turn.ended" or ended.get("reason") != "completed":
@@ -1298,8 +1299,10 @@ def _latest_kimi_completed_reply(path: Path, since_ms: int) -> dict[str, Any]:
                     parts.append(text)
         text = "".join(parts).strip()
         if text:
-            return {"text": text, "created_ms": completed_ms}
-    return {"text": ""}
+            completed.append({"text": text, "created_ms": completed_ms})
+            if len(completed) > 1:
+                return {"text": "", "ambiguous": True}
+    return completed[0] if completed else {"text": ""}
 
 
 def latest_kimi_final_reply(
@@ -1368,6 +1371,8 @@ def latest_kimi_final_reply(
         if updated_ms and updated_ms < since_ms:
             continue
         reply = _latest_kimi_completed_reply(wire_path, since_ms)
+        if reply.get("ambiguous"):
+            return {"available": True, "text": "", "ambiguous": True}
         if reply.get("text"):
             completed.append({**reply, "session_id": session_dir.name})
     if len(completed) == 1:

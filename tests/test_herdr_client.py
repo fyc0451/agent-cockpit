@@ -693,6 +693,30 @@ def test_latest_kimi_final_reply_fails_closed_when_workspace_is_ambiguous(tmp_pa
     assert result == {"available": True, "text": "", "ambiguous": True}
 
 
+def test_latest_kimi_final_reply_fails_closed_when_turn_is_ambiguous(tmp_path):
+    home = tmp_path / "kimi"
+    cwd = tmp_path / "workspace"
+    (home / "sessions").mkdir(parents=True)
+    cwd.mkdir()
+    session_id = "session_66666666-6666-4666-8666-666666666666"
+    _write_kimi_session(
+        home, cwd, session_id, updated_ms=31_000,
+        rows=[
+            *_kimi_completed_rows(6, "窗口内第一条回复", 30_000),
+            *_kimi_completed_rows(7, "窗口内第二条回复", 31_000),
+        ],
+    )
+
+    result = herdr_client.latest_kimi_final_reply(
+        {"agent": "kimi", "kind": "id", "value": session_id},
+        since_ms=20_000,
+        cwd=str(cwd),
+        kimi_home=str(home),
+    )
+
+    assert result == {"available": True, "text": "", "ambiguous": True}
+
+
 def test_latest_codex_commentary_returns_current_turn_newest_first(tmp_path):
     home = tmp_path / "private-codex"
     home.mkdir(mode=0o700)
