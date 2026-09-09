@@ -358,6 +358,12 @@ function assertHerdrMutation(raw: unknown, action: string): void {
 }
 
 /** 停止 herdr session。进程没了，名字还在，以后可以再 start。 */
+export async function startHerdrSession(name: string): Promise<unknown> {
+  const raw = await legacyPost(`/api/herdr/session/${encodeURIComponent(name)}/start`, {})
+  assertHerdrMutation(raw, '启动会话')
+  return raw
+}
+
 export async function stopHerdrSession(name: string): Promise<unknown> {
   const raw = await legacyPost(`/api/herdr/session/${encodeURIComponent(name)}/stop`, {})
   assertHerdrMutation(raw, '停止会话')

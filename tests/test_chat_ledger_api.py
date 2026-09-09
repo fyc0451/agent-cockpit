@@ -1795,6 +1795,20 @@ def test_ledger_only_terminal_line_skips_hub(isolated_ledger, monkeypatch):
     assert [row["text"] for row in listed.json()["messages"]] == []
 
 
+def test_start_existing_session_only(isolated_ledger, monkeypatch):
+    monkeypatch.setattr(server.team_sessions, "managed_binding_for_session", lambda _: None)
+    monkeypatch.setattr(server.herdr_client, "list_sessions", lambda: [{"name": "demo", "status": "stopped"}])
+    calls = []
+    monkeypatch.setattr(server.herdr_client, "start_session", lambda name: calls.append(name) or {"available": True, "started": name})
+    client = _client()
+    assert client.post("/api/herdr/session/demo/start", headers=_headers()).status_code == 200
+    assert calls == ["demo"]
+    assert client.post("/api/herdr/session/missing/start", headers=_headers()).status_code == 404
+    monkeypatch.setattr(server.team_sessions, "managed_binding_for_session", lambda _: {"project_slug": "ready"})
+    assert client.post("/api/herdr/session/demo/start", headers=_headers()).status_code == 409
+    assert calls == ["demo"]
+
+
 def test_terminal_ledger_never_replays_to_idle_agent(isolated_ledger, monkeypatch):
     client = _client()
     _, thread = _workspace_with_thread(client, isolated_ledger / "terminal", "terminal-1")

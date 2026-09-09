@@ -44,6 +44,7 @@ export interface WorkspaceBrowserProps {
   onNewSession: (root: string) => void
   onRemoveWorkspace: (id: string) => void
   onStopSession: (session: string) => void
+  onResumeSession?: (session: string) => Promise<void>
   onDeleteSession: (session: string) => void
   onOpenWorkspace: (id: string) => void
   // Cockpit 4.0: 团队区
@@ -149,6 +150,7 @@ export function WorkspaceBrowser({
   onNewSession,
   onRemoveWorkspace,
   onStopSession,
+  onResumeSession,
   onDeleteSession,
   onOpenWorkspace,
   teamEnabled = false,
@@ -168,6 +170,21 @@ export function WorkspaceBrowser({
 }: WorkspaceBrowserProps) {
   const { toggleSidebar } = useAppFrame()
   const [searchOpen, setSearchOpen] = useState(false)
+  const [starting, setStarting] = useState<string | null>(null)
+  const [startError, setStartError] = useState<string | null>(null)
+
+  const resume = async (name: string) => {
+    if (starting || !onResumeSession) return
+    setStarting(name)
+    setStartError(null)
+    try {
+      await onResumeSession(name)
+    } catch (error) {
+      setStartError(`启动 ${name} 失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setStarting(null)
+    }
+  }
   const [query, setQuery] = useState('')
   // 用户手动折叠的分组（root 键）。未分组用 '' 键，默认收起，不跟已入账群聊抢视线。
   const [closedGroups, setClosedGroups] = useState<Set<string>>(() => new Set(['']))
@@ -282,6 +299,15 @@ export function WorkspaceBrowser({
                     {row.status === 'stopped' ? '已停止' : `${row.memberCount} 人`}
                   </span>
                 </button>
+                {row.status === 'stopped' && onResumeSession && (
+                  <button type="button" className={css.iconButton}
+                    style={{ width: 'auto', flexShrink: 0 }}
+                    title={`启动会话 ${row.name}`} aria-label={`启动会话 ${row.name}`}
+                    disabled={starting !== null}
+                    onClick={() => { void resume(row.name) }}>
+                    {starting === row.name ? '启动中…' : '启动'}
+                  </button>
+                )}
                 <span className={css.rowActions}>
                   {row.status !== 'stopped' && (
                     <button
@@ -328,6 +354,7 @@ export function WorkspaceBrowser({
 
   return (
     <div className={css.root}>
+      {startError && <div role="alert">{startError}</div>}
       <div className={css.sectionHeader}>
         <span className={cx(css.sectionLabel, searchOpen && css.sectionLabelHidden)}>工作区</span>
         <div className={cx(css.searchSlot, searchOpen && css.searchSlotExpanded)}>

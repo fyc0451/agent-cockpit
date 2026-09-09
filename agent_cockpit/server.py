@@ -10805,6 +10805,17 @@ def api_herdr_pane_delete(session: str, pane_id: str):
     return result
 
 
+@app.post("/api/herdr/session/{name}/start")
+def api_herdr_session_start(name: str):
+    """仅恢复已存在的普通本机会话，不隐式创建或改绑 Team Agent。"""
+    _validate_session_name(name)
+    if team_sessions.managed_binding_for_session(name) is not None:
+        raise HTTPException(409, "请在对应 Topic 中恢复专用 Agent")
+    if not any(row.get("name") == name for row in herdr_client.list_sessions()):
+        raise HTTPException(404, "会话不存在，请刷新列表")
+    return herdr_client.start_session(name)
+
+
 @app.post("/api/herdr/session/{name}/stop")
 def api_herdr_session_stop(name: str):
     """停止 herdr session。"""

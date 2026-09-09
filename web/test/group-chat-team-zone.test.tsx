@@ -269,6 +269,26 @@ describe('WorkspaceBrowser 团队区域', () => {
 })
 
 describe('WorkspaceBrowser 工作区导航', () => {
+  it('已停止会话常驻启动按钮，失败显示错误且不选择会话', async () => {
+    const onSelect = vi.fn()
+    const onResume = vi.fn().mockRejectedValue(new Error('启动超时'))
+    renderWithAppFrame(<WorkspaceBrowser
+      groups={[{ id: 'ws', root: '/repo', label: 'repo', removable: true,
+        rows: [{ name: 'stopped-1', status: 'stopped', memberCount: 0, root: '/repo' },
+          { name: 'running-1', status: 'idle', memberCount: 1, root: '/repo' }] }]}
+      ungrouped={[]} activeSession={null} loading={false} wide={true}
+      onSelect={onSelect} onAddWorkspace={vi.fn()} onNewSession={vi.fn()}
+      onRemoveWorkspace={vi.fn()} onStopSession={vi.fn()} onDeleteSession={vi.fn()}
+      onOpenWorkspace={vi.fn()} onResumeSession={onResume}
+    />)
+    expect(screen.queryByRole('button', { name: '启动会话 running-1' })).not.toBeInTheDocument()
+    await userEvent.setup().click(screen.getByRole('button', { name: '启动会话 stopped-1' }))
+    expect(onResume).toHaveBeenCalledWith('stopped-1')
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(await screen.findByRole('alert')).toHaveTextContent('启动超时')
+    expect(screen.getByRole('button', { name: '启动会话 stopped-1' })).toBeEnabled()
+  })
+
   it('点工作区标题只打开，不把会话列表收起', async () => {
     const onOpen = vi.fn()
     const onSelect = vi.fn()

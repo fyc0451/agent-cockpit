@@ -15,6 +15,7 @@ import {
   fetchHerdrSnapshot,
   fetchHerdrStatus,
   stopHerdrSession,
+  startHerdrSession,
 } from '../../api/legacyHerdr'
 import {
   bindChatWorkspace,
@@ -155,6 +156,7 @@ function NarrowAwareBrowser(props: {
   onNewSession: (root: string) => void
   onRemoveWorkspace: (id: string) => void
   onStopSession: (session: string) => void
+  onResumeSession: (session: string) => Promise<void>
   onDeleteSession: (session: string) => void
   onOpenWorkspace: (id: string) => void
   teamEnabled?: boolean
@@ -1230,6 +1232,11 @@ export function GroupChatPage() {
                 }}
                 onRemoveWorkspace={onRemoveWorkspace}
                 onStopSession={(name) => { setSessionAction({ kind: 'stop', name }) }}
+                onResumeSession={async (name) => {
+                  await requireAuthenticated()
+                  await startHerdrSession(name)
+                  refreshSessions()
+                }}
                 onDeleteSession={(name) => { setSessionAction({ kind: 'delete', name }) }}
                 onOpenWorkspace={(id) => { void onOpenWorkspace(id) }}
                 teamEnabled={teamEnabled}
