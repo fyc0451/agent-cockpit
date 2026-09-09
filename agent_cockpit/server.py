@@ -9011,6 +9011,7 @@ def _flush_queued_chat_mail(session: str, snap: dict[str, Any]) -> None:
     pending = [
         row for row in rows
         if str(row.get("kind") or "") == "me"
+        and row.get("source") != "terminal"
         and _chat_delivery_mode(row.get("delivery")) == "queue"
         and str(row.get("text") or "").strip()
     ]
@@ -9083,10 +9084,19 @@ def api_chat_session_mail(name: str, req: ChatMailReq):
     if req.ledger_only:
         if not recipients:
             recipients = ["终端"]
+        # CLI commands already travelled over the terminal WebSocket. Never
+        # turn them into chat prompts, including requests from older clients.
+        if text.startswith("/"):
+            return {
+                "ok": True, "project": None, "to": recipients,
+                "sender": "human", "message": None,
+                "mail_error": None, "result": None,
+            }
         try:
             saved = chat_ledger.append_message(
                 name, kind="me", sender="human", text=text, to=recipients,
-                delivery=delivery, source=req.source, direct=req.direct,
+                delivery=delivery, source="terminal", direct=req.direct,
+                notified_to=recipients,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc

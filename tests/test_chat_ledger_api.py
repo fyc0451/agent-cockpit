@@ -1795,6 +1795,43 @@ def test_ledger_only_terminal_line_skips_hub(isolated_ledger, monkeypatch):
     assert [row["text"] for row in listed.json()["messages"]] == []
 
 
+def test_terminal_ledger_never_replays_to_idle_agent(isolated_ledger, monkeypatch):
+    client = _client()
+    _, thread = _workspace_with_thread(client, isolated_ledger / "terminal", "terminal-1")
+    session = thread["herdr_session"]
+    pane = {
+        "session": session, "pane_id": "w1:p1", "agent": "codex",
+        "mail_name": "BrownDesert", "agent_status": "idle",
+    }
+    sent = []
+    monkeypatch.setattr(server.herdr_client, "pane_send", lambda *args: sent.append(args))
+    monkeypatch.setattr(server.hub_client, "overseer_send", lambda **kw: sent.append(kw))
+    for command in ["/fast", "/model codex", "/", "  /help"]:
+        response = client.post(
+            f"/api/chat/sessions/{session}/mail", headers=_headers(),
+            json={"text": command, "to": ["BrownDesert"], "ledger_only": True},
+        )
+        assert response.status_code == 200
+        assert response.json()["message"] is None
+    assert chat_ledger.list_messages(session) == []
+    response = client.post(
+        f"/api/chat/sessions/{session}/mail", headers=_headers(),
+        json={"text": "终端已发送的问题", "to": ["BrownDesert"], "ledger_only": True},
+    )
+    assert response.status_code == 200
+    row = chat_ledger.list_messages(session)[0]
+    assert row["source"] == "terminal"
+    assert row["notified_to"] == ["BrownDesert"]
+    # Source guard also works independently of recipient acknowledgement.
+    chat_ledger.append_message(
+        session, kind="me", sender="human", text="只记账",
+        to=["BrownDesert"], source="terminal", delivery="queue",
+    )
+    for _ in range(2):
+        server._flush_queued_chat_mail(session, {"panes": [pane]})
+    assert sent == []
+
+
 def test_send_chat_mail_persists_neighbor_and_resolves_hub_recipient(
     isolated_ledger, monkeypatch,
 ):

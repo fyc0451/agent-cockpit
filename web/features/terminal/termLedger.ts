@@ -14,7 +14,7 @@ export function feedTermLedger(
     if (ch === '\r' || ch === '\n') {
       const text = buf.trim()
       buf = ''
-      if (text) line = text
+      if (text && !text.startsWith('/')) line = text
       continue
     }
     if (ch === '\x7f' || ch === '\b') {

@@ -25,4 +25,11 @@ describe('feedTermLedger', () => {
   it('空回车不交行', () => {
     expect(feedTermLedger('   ', '\r')).toEqual({ buffer: '', line: null })
   })
+
+  it('CLI 斜杠命令只留在终端，不变成聊天消息', () => {
+    for (const command of ['/fast', '/model codex', '/', '  /help']) {
+      expect(feedTermLedger('', `${command}\r`)).toEqual({ buffer: '', line: null })
+    }
+    expect(feedTermLedger('/fa', 'st\r')).toEqual({ buffer: '', line: null })
+  })
 })
