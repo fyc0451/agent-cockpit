@@ -8938,8 +8938,8 @@ def _chat_notify_hint(session: str, text: str, delivery: str) -> str:
         )
     elif delivery == "queue":
         opener = (
-            "Boss 在群聊给你排了一条消息。请做完手头事后再处理下面这条，"
-            "结论写在终端，群聊会收进瀑布流。\n"
+            "Boss 给你发送了一条当前任务。若消息要求开发、修改、修复、实现或测试，"
+            "立即使用工具执行；不要只回复确认或计划。完成后把结论写在终端，群聊会收进瀑布流。\n"
         )
     else:
         opener = (
@@ -8997,6 +8997,26 @@ def _notify_chat_recipients(
             continue
         notified.append(dest)
     return notified
+
+
+def _remember_chat_message_targets(
+    session: str, message_id: str, recipients: list[str], snap: dict[str, Any] | None = None,
+) -> None:
+    """把用户消息绑定到实际目标 pane，回流不得跨 pane 猜测归属。"""
+    if not message_id or not recipients:
+        return
+    try:
+        snap = snap or _enrich_board_identities(_herdr_runtime_snapshot())
+    except Exception:
+        return
+    panes = _session_agent_panes(snap, session)
+    for pane in panes:
+        pane_id = str(pane.get("pane_id") or "")
+        if not pane_id:
+            continue
+        if any(_match_chat_mail_dest(item, pane, panes, session) for item in recipients):
+            _PANE_LAST_MESSAGE[(session, pane_id)] = message_id
+    _save_harvest_status()
 
 
 def _flush_queued_chat_mail(session: str, snap: dict[str, Any]) -> None:
@@ -9064,6 +9084,7 @@ def _flush_queued_chat_mail(session: str, snap: dict[str, Any]) -> None:
                 continue
             if updated:
                 row["notified_to"] = list(updated.get("notified_to") or [])
+                _remember_chat_message_targets(session, str(row["id"]), [dest], snap)
                 # 一个 pane 一次只领一条。Herdr 状态切到 working 前仍可能短暂
                 # 显示 idle；本轮继续 pane_send 会把多条排队同时塞进同一输入流。
                 break
@@ -9148,6 +9169,7 @@ def api_chat_session_mail(name: str, req: ChatMailReq):
                         marked = None
                     if marked:
                         saved = marked
+                        _remember_chat_message_targets(name, str(saved["id"]), notified)
             except Exception as exc:
                 mail_error = str(exc)
     elif project is not None and mail_error is None:
@@ -9194,6 +9216,7 @@ def api_chat_session_mail(name: str, req: ChatMailReq):
                         marked = None
                     if marked:
                         saved = marked
+                        _remember_chat_message_targets(name, str(saved["id"]), notified)
             except Exception as exc:
                 mail_error = str(exc)
     return {
